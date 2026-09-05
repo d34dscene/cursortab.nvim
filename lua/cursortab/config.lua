@@ -35,6 +35,7 @@
 ---@field middle string FIM middle token (e.g., "<|fim_middle|>")
 ---@field repo_name string Optional repo-level FIM token (e.g., "<|repo_name|>"); enables cross-file context
 ---@field file_sep string Optional file separator token (e.g., "<|file_sep|>"); enables cross-file context
+---@field suffix_first boolean Optional; emit suffix content before prefix content (Mellum, SeedCoder style)
 
 ---@class CursortabProviderConfig
 ---@field type string
@@ -293,13 +294,17 @@ local valid_provider_types = {
 local valid_log_levels = { trace = true, debug = true, info = true, warn = true, error = true }
 local valid_addition_styles = { dimmed = true, highlight = true }
 
+-- Documented optional keys that stay nil in default_config, so the default-key
+-- validator would otherwise reject them.
+local optional_provider_keys = { fim_tokens = true }
+
 -- Validate that all keys in user config exist in default config
 ---@param user_cfg table User configuration
 ---@param default_cfg table Default configuration
 ---@param path string Current path for error messages
 local function validate_config_keys(user_cfg, default_cfg, path)
 	for key, value in pairs(user_cfg) do
-		if default_cfg[key] == nil then
+		if default_cfg[key] == nil and not (path == "provider." and optional_provider_keys[key]) then
 			error(string.format("[cursortab.nvim] Unknown config option: %s%s", path, key))
 		end
 		-- Recursively validate nested tables (skip lists with numeric keys)
@@ -451,6 +456,10 @@ local function validate_config(cfg)
 						field
 					))
 				end
+			end
+			if cfg.provider.fim_tokens.suffix_first ~= nil
+				and type(cfg.provider.fim_tokens.suffix_first) ~= "boolean" then
+				error("[cursortab.nvim] provider.fim_tokens.suffix_first must be a boolean")
 			end
 		end
 	end
