@@ -22,6 +22,7 @@ func (e *Engine) handleCompletionReadyImpl(response *types.CompletionResponse, m
 
 	switch e.processCompletionWithManual(response, manual) {
 	case completionShown:
+		e.maybeArmNextEdit()
 		return
 	case completionSuppressed:
 		e.pendingMetricsInfo = nil
@@ -30,6 +31,44 @@ func (e *Engine) handleCompletionReadyImpl(response *types.CompletionResponse, m
 
 	e.pendingMetricsInfo = nil
 	e.handleCompletionNoChanges(response)
+}
+
+// maybeArmNextEdit arms the pause timer after a typing-source completion is
+// displayed. If the user leaves it alone, the next-edit provider gets asked
+// and may replace the ghost with a full edit.
+func (e *Engine) maybeArmNextEdit() {
+	if e.lastCompletionSource != types.CompletionSourceTyping {
+		return
+	}
+	if !e.display.hasCompletion() {
+		return
+	}
+	e.startNextEditTimer()
+}
+
+// handleNextEditReady swaps the displayed ghost for the next-edit provider's
+// edit, unless the display changed while the request was in flight.
+func (e *Engine) handleNextEditReady(response *types.CompletionResponse) {
+	e.nextEditRequestID = 0
+	e.nextEditCancel = nil
+	display := e.nextEditDisplayComp
+	e.nextEditDisplayComp = nil
+
+	if e.state != stateHasCompletion || !e.display.hasCompletion() || e.display.current() != display {
+		return
+	}
+	if response == nil || response.Completion == nil {
+		return
+	}
+	comp := response.Completion
+	if !e.buffer.HasChanges(comp.StartLine, comp.EndLineInc, comp.Lines) {
+		return
+	}
+
+	e.reject()
+	if e.processCompletionWithManual(response, false) != completionShown {
+		return
+	}
 }
 
 func (e *Engine) handleCompletionNoChanges(response *types.CompletionResponse) {

@@ -180,6 +180,7 @@ func (e *Engine) handleStreamCompleteSimple() {
 	if firstStageRendered {
 		e.cursorTarget = firstStage.CursorTarget
 		e.state = stateHasCompletion
+		e.maybeArmNextEdit()
 		return
 	}
 
@@ -190,6 +191,7 @@ func (e *Engine) handleStreamCompleteSimple() {
 	} else {
 		e.showCurrentStage()
 	}
+	e.maybeArmNextEdit()
 }
 
 func (e *Engine) handleStreamCompleteAfterAccept(resp *types.CompletionResponse, manual bool) {

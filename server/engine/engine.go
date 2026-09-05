@@ -94,6 +94,14 @@ type Engine struct {
 	streamLinesChan         <-chan string // Lines channel (nil when not streaming)
 	acceptedDuringStreaming bool          // True if user accepted partial during streaming
 
+	// Dual mode: next-edit provider state. The side-channel request runs
+	// while a completion is displayed; nextEditRequestID is 0 when idle.
+	nextEditProvider    Provider
+	nextEditTimer       Timer
+	nextEditRequestID   uint64
+	nextEditCancel      context.CancelFunc
+	nextEditDisplayComp *types.Completion // Ghost identity the request was made against
+
 	// Mode tracking
 	inInsertMode bool
 
@@ -148,6 +156,7 @@ func NewEngine(provider Provider, buf Buffer, config EngineConfig, clock Clock, 
 		stopped:             false,
 		fileStateStore:      make(map[string]*FileState),
 		rejectedCompletions: make(map[string][]*rejectedCompletion),
+		nextEditProvider:    config.NextEditProvider,
 	}
 
 	// Initialize metrics: combine provider sender + community sender if available
@@ -393,6 +402,63 @@ func (e *Engine) stopTextChangeTimer() {
 		e.textChangeTimer.Stop()
 		e.textChangeTimer = nil
 	}
+}
+
+// startNextEditTimer arms the pause timer that consults the next-edit
+// provider while a completion stays displayed and untouched.
+func (e *Engine) startNextEditTimer() {
+	if e.nextEditProvider == nil || e.config.NextEditIdleDelay <= 0 {
+		return
+	}
+	if !e.isModeEnabled(false) {
+		return
+	}
+	e.stopNextEditTimer()
+	e.nextEditTimer = e.clock.AfterFunc(e.config.NextEditIdleDelay, func() {
+		e.mu.RLock()
+		stopped := e.stopped
+		mainCtx := e.mainCtx
+		e.mu.RUnlock()
+
+		if stopped || mainCtx == nil {
+			return
+		}
+
+		select {
+		case e.eventChan <- Event{Type: EventNextEditTimeout}:
+		case <-mainCtx.Done():
+		}
+	})
+}
+
+func (e *Engine) stopNextEditTimer() {
+	if e.nextEditTimer != nil {
+		e.nextEditTimer.Stop()
+		e.nextEditTimer = nil
+	}
+}
+
+// cancelNextEdit drops any in-flight side-channel next-edit request and
+// stops the pause timer. Called whenever the buffer or display changes.
+func (e *Engine) cancelNextEdit() {
+	e.stopNextEditTimer()
+	if e.nextEditCancel != nil {
+		e.nextEditCancel()
+		e.nextEditCancel = nil
+	}
+	e.nextEditRequestID = 0
+	e.nextEditDisplayComp = nil
+}
+
+// requestProviderFor returns the provider a request with this source should
+// go to. Idle requests go to the next-edit provider in dual mode: the edit
+// model is strictly better suited to idle time and stays quiet when there
+// is nothing to suggest.
+func (e *Engine) requestProviderFor(source types.CompletionSource) Provider {
+	if source == types.CompletionSourceIdle && e.nextEditProvider != nil {
+		return e.nextEditProvider
+	}
+	return e.provider
 }
 
 // isModeEnabled returns true if completions are enabled for the current mode

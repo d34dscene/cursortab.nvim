@@ -26,6 +26,7 @@ const (
 	EventPartialAccept     EventType = "partial_accept"
 	EventFileSaved         EventType = "file_saved"
 	EventIdleTimeout       EventType = "idle_timeout"
+	EventNextEditTimeout   EventType = "next_edit_timeout"
 	EventCompletionReady   EventType = "completion_ready"
 	EventCompletionError   EventType = "completion_error"
 	EventPrefetchReady     EventType = "prefetch_ready"
@@ -54,7 +55,7 @@ func EventTypeFromString(s string) EventType {
 	switch EventType(s) {
 	case EventEsc, EventTextChanged, EventTextChangeTimeout, EventTrigger,
 		EventCursorMoved, EventInsertEnter, EventInsertLeave, EventAccept,
-		EventPartialAccept, EventFileSaved, EventIdleTimeout:
+		EventPartialAccept, EventFileSaved, EventIdleTimeout, EventNextEditTimeout:
 		return EventType(s)
 	}
 	return ""
@@ -99,6 +100,7 @@ var transitions = []Transition{
 	{stateIdle, EventTextChangeTimeout, (*Engine).doRequestCompletion},
 	{stateIdle, EventTrigger, (*Engine).doManualTrigger},
 	{stateIdle, EventIdleTimeout, (*Engine).doRequestIdleCompletion},
+	{stateIdle, EventNextEditTimeout, (*Engine).doRequestIdleCompletion},
 	{stateIdle, EventCursorMoved, (*Engine).doResetIdleTimer},
 	{stateIdle, EventInsertEnter, (*Engine).stopIdleTimer},
 	{stateIdle, EventInsertLeave, (*Engine).startIdleTimer},
@@ -121,6 +123,7 @@ var transitions = []Transition{
 	{stateHasCompletion, EventFileSaved, (*Engine).doFileSaved},
 	{stateHasCompletion, EventInsertLeave, (*Engine).doRejectAndStartIdleTimer},
 	{stateHasCompletion, EventCursorMoved, (*Engine).doResetIdleTimer},
+	{stateHasCompletion, EventNextEditTimeout, (*Engine).doNextEditTimeout},
 
 	// From stateHasCursorTarget
 	{stateHasCursorTarget, EventAccept, (*Engine).acceptCursorTarget},
@@ -286,6 +289,14 @@ func (e *Engine) handleEvent(event Event) {
 	// Layer 2: Dispatch table for user/timer events
 	e.dispatch(event)
 
+	// The displayed completion and buffer changed (or are about to): drop the
+	// pause timer and any in-flight next-edit request.
+	switch event.Type {
+	case EventTextChanged, EventAccept, EventPartialAccept, EventEsc,
+		EventInsertLeave, EventFileSaved:
+		e.cancelNextEdit()
+	}
+
 	// Cancel completions when entering a disabled mode
 	// (handles transitions not in the table, e.g. InsertEnter from PendingCompletion)
 	if !e.isModeEnabled(false) && e.state != stateIdle {
@@ -298,6 +309,10 @@ func (e *Engine) handleEvent(event Event) {
 func (e *Engine) handleBackgroundEvent(event Event) bool {
 	switch event.Type {
 	case EventCompletionReady:
+		if event.RequestID != 0 && event.RequestID == e.nextEditRequestID {
+			e.handleNextEditReady(event.Response)
+			return true
+		}
 		if event.RequestID == 0 || event.RequestID != e.completionRequestID {
 			return true
 		}
@@ -316,6 +331,15 @@ func (e *Engine) handleBackgroundEvent(event Event) bool {
 		return true
 
 	case EventCompletionError:
+		if event.RequestID != 0 && event.RequestID == e.nextEditRequestID {
+			if !errors.Is(event.Err, context.Canceled) {
+				logger.Debug("next-edit request error: %v", event.Err)
+			}
+			e.nextEditRequestID = 0
+			e.nextEditCancel = nil
+			e.nextEditDisplayComp = nil
+			return true
+		}
 		if event.RequestID == 0 || event.RequestID != e.completionRequestID {
 			return true
 		}
@@ -359,6 +383,10 @@ func (e *Engine) doRequestIdleCompletion() {
 	if e.state == stateIdle {
 		e.requestCompletion(types.CompletionSourceIdle, false)
 	}
+}
+
+func (e *Engine) doNextEditTimeout() {
+	e.requestNextEditSideChannel()
 }
 
 func (e *Engine) doResetIdleTimer() {

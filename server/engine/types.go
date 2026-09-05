@@ -264,4 +264,10 @@ type EngineConfig struct {
 	CompleteInNormal       bool     // Show completions in normal mode
 	DisabledIn             []string // Treesitter scopes where completions are suppressed
 	DisableProviderMetrics bool     // Skip wiring provider as metrics.Sender (eval harness sets this)
+
+	// Dual mode: a second, edit-kind provider asked when the user pauses.
+	// Nil disables it. NextEditIdleDelay is how long the display must stay
+	// untouched before the next-edit provider is consulted.
+	NextEditProvider  Provider
+	NextEditIdleDelay time.Duration
 }

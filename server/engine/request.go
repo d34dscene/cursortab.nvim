@@ -40,10 +40,14 @@ func (e *Engine) collectCompletionInput(parent context.Context, sourceInput ctx.
 }
 
 func (e *Engine) prepareCompletionInput(parent context.Context, opts completionInputOptions) (ctx.CompletionInput, bool, error) {
-	requirements := e.provider.RequiredMaterials()
+	return e.prepareCompletionInputFor(e.provider, parent, opts)
+}
+
+func (e *Engine) prepareCompletionInputFor(p Provider, parent context.Context, opts completionInputOptions) (ctx.CompletionInput, bool, error) {
+	requirements := p.RequiredMaterials()
 	sourceInput := e.buildContextSourceInput(opts, requirements)
 	input := ctx.CompletionInput{Current: sourceInput.Current}
-	if !completionInputCompatible(e.provider.CompletionKind(), sourceInput.Current) {
+	if !completionInputCompatible(p.CompletionKind(), sourceInput.Current) {
 		return input, false, nil
 	}
 	collected, err := e.collectCompletionInput(parent, sourceInput, requirements)
@@ -53,8 +57,8 @@ func (e *Engine) prepareCompletionInput(parent context.Context, opts completionI
 	return collected, true, nil
 }
 
-func (e *Engine) startProviderCompletion(reqCtx context.Context, input ctx.CompletionInput) (*types.CompletionResponse, CompletionStream, error) {
-	if streamingProvider, ok := e.provider.(StreamingProvider); ok {
+func (e *Engine) startProviderCompletionFor(p Provider, reqCtx context.Context, input ctx.CompletionInput) (*types.CompletionResponse, CompletionStream, error) {
+	if streamingProvider, ok := p.(StreamingProvider); ok {
 		stream, err := streamingProvider.StreamCompletion(reqCtx, input)
 		if err != nil {
 			return nil, nil, err
@@ -64,7 +68,7 @@ func (e *Engine) startProviderCompletion(reqCtx context.Context, input ctx.Compl
 		}
 	}
 
-	result, err := e.provider.Complete(reqCtx, input)
+	result, err := p.Complete(reqCtx, input)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -108,6 +112,12 @@ func (e *Engine) requestCompletion(source types.CompletionSource, manual bool) {
 		return
 	}
 
+	// Any new request supersedes an in-flight next-edit side request and its
+	// pause timer. This also keeps request IDs unambiguous: both request
+	// kinds draw from the same counter, so a late next-edit response can
+	// never collide with a newer completion request.
+	e.cancelNextEdit()
+
 	// Drop any leftover stream from a prior accept-during-streaming. The
 	// new request supersedes its "next prediction" output; without this,
 	// the leftover stream's late completion hits handleStreamCompleteAfterAccept
@@ -123,9 +133,10 @@ func (e *Engine) requestCompletion(source types.CompletionSource, manual bool) {
 
 	e.lastCompletionSource = source
 
+	activeProvider := e.requestProviderFor(source)
 	e.completionRequestID++
 	requestID := e.completionRequestID
-	input, compatible, err := e.prepareCompletionInput(e.mainCtx, completionInputOptions{})
+	input, compatible, err := e.prepareCompletionInputFor(activeProvider, e.mainCtx, completionInputOptions{})
 	if err != nil {
 		select {
 		case e.eventChan <- Event{Type: EventCompletionError, RequestID: requestID, Err: err}:
@@ -146,7 +157,7 @@ func (e *Engine) requestCompletion(source types.CompletionSource, manual bool) {
 	reqCtx, cancel := context.WithTimeout(e.mainCtx, e.config.CompletionTimeout)
 	e.currentCancel = cancel
 	go func() {
-		result, stream, err := e.startProviderCompletion(reqCtx, input)
+		result, stream, err := e.startProviderCompletionFor(activeProvider, reqCtx, input)
 		if err != nil {
 			cancel()
 			select {
@@ -409,4 +420,63 @@ func (e *Engine) prefetchAtCursorTarget() {
 func (e *Engine) canPrefetchWithSyntheticCurrent() bool {
 	return e.provider.CompletionKind() == CompletionEdit &&
 		e.provider.CanPrefetchFromSyntheticCurrent()
+}
+
+// requestNextEditSideChannel asks the next-edit provider about the current
+// buffer while a completion is already displayed. Unlike requestCompletion
+// it does not change state and does not touch the displayed completion: the
+// ghost stays usable while the (slower) edit model thinks. The response is
+// dropped unless the same completion is still displayed when it arrives.
+func (e *Engine) requestNextEditSideChannel() {
+	if e.stopped || e.nextEditProvider == nil {
+		return
+	}
+	if e.state != stateHasCompletion || !e.display.hasCompletion() {
+		return
+	}
+	if e.nextEditRequestID != 0 {
+		return
+	}
+	if !e.isModeEnabled(false) {
+		return
+	}
+	if reason := e.suppressCompletionRequest(types.CompletionSourceIdle, false); reason != "" {
+		logger.Debug("next-edit suppressed: %s", reason)
+		return
+	}
+
+	e.syncBuffer()
+
+	e.completionRequestID++
+	e.nextEditRequestID = e.completionRequestID
+	requestID := e.nextEditRequestID
+	e.nextEditDisplayComp = e.display.current()
+	input, compatible, err := e.prepareCompletionInputFor(e.nextEditProvider, e.mainCtx, completionInputOptions{})
+	if err != nil || !compatible {
+		e.nextEditRequestID = 0
+		e.nextEditDisplayComp = nil
+		if err != nil {
+			logger.Debug("next-edit input error: %v", err)
+		}
+		return
+	}
+
+	reqCtx, cancel := context.WithTimeout(e.mainCtx, e.config.CompletionTimeout)
+	e.nextEditCancel = cancel
+	go func() {
+		result, _, err := e.startProviderCompletionFor(e.nextEditProvider, reqCtx, input)
+		if err != nil {
+			cancel()
+			select {
+			case e.eventChan <- Event{Type: EventCompletionError, RequestID: requestID, Err: err}:
+			case <-e.mainCtx.Done():
+			}
+			return
+		}
+		cancel()
+		select {
+		case e.eventChan <- Event{Type: EventCompletionReady, RequestID: requestID, Response: result}:
+		case <-e.mainCtx.Done():
+		}
+	}()
 }
