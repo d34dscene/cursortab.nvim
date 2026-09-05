@@ -312,6 +312,11 @@ end
 ---@field row_offset integer|nil visual row offset from buffer_line (for virtual line placements)
 ---@field screen_anchor ScreenAnchor|nil absolute screen position for horizontal and wrapped-line placement
 
+-- Wininfo of the parent window, fetched once per render pass. A multi-line
+-- completion renders many overlay windows and getwininfo is not cheap.
+---@type table|nil
+local pass_wininfo = nil
+
 -- Create transparent overlay window with syntax highlighting
 ---@param parent_win integer
 ---@param buffer_line integer
@@ -337,7 +342,7 @@ local function create_overlay_window(parent_win, buffer_line, col, content, synt
 
 	-- Query parent window state once: topline, leftcol, winrow, cursor, cursorline
 	---@type {topline: integer, leftcol: integer, winrow: integer, wincol: integer, textoff: integer, winbar: integer}
-	local wininfo = vim.fn.getwininfo(parent_win)[1]
+	local wininfo = pass_wininfo or vim.fn.getwininfo(parent_win)[1]
 	local leftcol = wininfo.leftcol or 0
 	local first_visible_line = wininfo.topline
 	local winrow = (wininfo.winrow or 1) + (wininfo.winbar or 0)
@@ -827,7 +832,9 @@ local function show_completion(diff_result)
 
 	-- Pre-scroll viewport if stacked modifications would overflow the bottom
 	local win_height = vim.api.nvim_win_get_height(current_win)
-	local topline = vim.fn.getwininfo(current_win)[1].topline
+	local wininfo = vim.fn.getwininfo(current_win)[1]
+	pass_wininfo = wininfo
+	local topline = wininfo.topline
 	local max_row = 0
 	local extra_virt = 0
 	for _, group in ipairs(diff_result.groups or {}) do
@@ -1006,7 +1013,9 @@ end
 function ui.show_completion(diff_result)
 	has_completion = true
 	ui.ensure_close_all()
+	pass_wininfo = nil
 	local ok = pcall(show_completion, diff_result)
+	pass_wininfo = nil
 	if not ok then
 		ui.ensure_close_all()
 		has_completion = false
