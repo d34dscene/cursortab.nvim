@@ -84,6 +84,9 @@ local gitignore_exceptions = {
 }
 
 -- Check if a file is ignored by git (cached).
+-- The first check for a path runs git asynchronously and optimistically treats
+-- the file as not ignored; the cache is corrected and buffer state invalidated
+-- when the spawn completes.
 ---@param path string Absolute file path
 ---@return boolean
 local function is_gitignored(path)
@@ -95,10 +98,16 @@ local function is_gitignored(path)
 	if cached ~= nil then
 		return cached
 	end
-	vim.fn.system({ "git", "check-ignore", "--quiet", path })
-	local ignored = vim.v.shell_error == 0
-	gitignore_cache[path] = ignored
-	return ignored
+	gitignore_cache[path] = false
+	vim.system({ "git", "check-ignore", "--quiet", path }, nil, function(result)
+		local ignored = result and result.code == 0
+		if gitignore_cache[path] ~= ignored then
+			gitignore_cache[path] = ignored
+			buffer_state.current_buf = nil
+			buffer_state.current_win = nil
+		end
+	end)
+	return false
 end
 
 -- Global buffer state cache to avoid expensive API calls on every cursor movement
