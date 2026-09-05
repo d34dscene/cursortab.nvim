@@ -61,7 +61,7 @@ func TestTrimFileStateStore(t *testing.T) {
 	eng := createTestEngine(buf, prov, clock)
 
 	// Add 5 file states
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		eng.fileStateStore[string(rune('a'+i))+".go"] = &FileState{
 			LastAccessNs: int64(i * 1000),
 		}

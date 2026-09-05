@@ -318,10 +318,7 @@ func (b *evalBatch) Execute() error {
 		return nil
 	}
 	start := b.startLine - 1
-	end := b.endLineInc
-	if end > len(buf) {
-		end = len(buf)
-	}
+	end := min(b.endLineInc, len(buf))
 	if start > len(buf) {
 		start = len(buf)
 	}

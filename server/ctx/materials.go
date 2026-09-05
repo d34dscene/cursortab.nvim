@@ -101,10 +101,9 @@ func truncateLinesByBytes(lines []string, maxBytes int) []string {
 		end++
 	}
 	if end == 0 {
-		cut := maxBytes - 1 // leave room for the newline
-		if cut < 0 {
-			cut = 0
-		}
+		cut := max(
+			// leave room for the newline
+			maxBytes-1, 0)
 		return []string{lines[0][:cut]}
 	}
 	return slices.Clone(lines[:end])
@@ -116,8 +115,8 @@ type EditHistory struct {
 
 func (EditHistory) collect(_ context.Context, input ContextSourceInput) (material, error) {
 	var result EditHistory
-	for i := len(input.Snapshot.RecentFiles) - 1; i >= 0; i-- {
-		file := input.Snapshot.RecentFiles[i]
+	for _, file := range slices.Backward(input.Snapshot.RecentFiles) {
+
 		diffs := buffer.ProcessDiffHistory(file.DiffHistories, input.Snapshot.NowNs)
 		if len(diffs) == 0 {
 			continue

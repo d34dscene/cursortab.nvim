@@ -1,5 +1,7 @@
 package utils
 
+import "slices"
+
 import "cursortab/types"
 
 // Abs returns the absolute value of an integer
@@ -198,8 +200,8 @@ func TrimDiffEntries[T DiffEntry](diffs []T, maxTokens int) []T {
 	totalChars := 0
 	cutoffIndex := 0
 
-	for i := len(diffs) - 1; i >= 0; i-- {
-		entryChars := len(diffs[i].GetOriginal()) + len(diffs[i].GetUpdated())
+	for i, diff := range slices.Backward(diffs) {
+		entryChars := len(diff.GetOriginal()) + len(diff.GetUpdated())
 		if totalChars+entryChars > maxChars && i < len(diffs)-1 {
 			cutoffIndex = i + 1
 			break

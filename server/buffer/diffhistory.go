@@ -69,10 +69,7 @@ func withinProximity(lineA, lineB int) bool {
 
 // mergeEntries combines two entries into one, keeping the wider range.
 func mergeEntries(a, b *types.DiffEntry) *types.DiffEntry {
-	startLine := a.StartLine
-	if b.StartLine < startLine {
-		startLine = b.StartLine
-	}
+	startLine := min(b.StartLine, a.StartLine)
 
 	origA := a.Original
 	origB := b.Original
@@ -114,7 +111,7 @@ func CollapseNetChanges(entries []*types.DiffEntry) []*types.DiffEntry {
 	// Mark entries for removal
 	removed := make([]bool, len(entries))
 
-	for i := 0; i < len(entries); i++ {
+	for i := range entries {
 		if removed[i] {
 			continue
 		}

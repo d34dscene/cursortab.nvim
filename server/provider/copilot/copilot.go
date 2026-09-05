@@ -81,7 +81,7 @@ type Provider struct {
 	buffer LSPBuffer
 
 	mu            sync.Mutex
-	reqIDCounter  int64
+	reqIDCounter  atomic.Int64
 	pendingReqID  int64
 	pendingResult chan *copilotResult
 
@@ -135,7 +135,7 @@ func (p *Provider) Call(reqCtx context.Context, req copilotRequest) ([]copilotEd
 		return nil, fmt.Errorf("register copilot handler: %w", err)
 	}
 
-	reqID := atomic.AddInt64(&p.reqIDCounter, 1)
+	reqID := p.reqIDCounter.Add(1)
 
 	p.mu.Lock()
 	if req.uri != p.lastFocusedURI {
@@ -330,10 +330,7 @@ func mergeCompletionEdits(original []string, edits []*types.Completion) *types.C
 	}
 
 	startLine := start + 1
-	endLineInc := oldEnd + 1
-	if endLineInc < startLine {
-		endLineInc = startLine
-	}
+	endLineInc := max(oldEnd+1, startLine)
 
 	newLines := slices.Clone(updated[start : newEnd+1])
 	return &types.Completion{

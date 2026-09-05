@@ -286,7 +286,7 @@ type Provider struct {
 	provider.Base
 	buffer     InfoProvider
 	httpClient *http.Client
-	reqCounter int64
+	reqCounter atomic.Int64
 }
 
 var _ engine.Provider = (*Provider)(nil)
@@ -314,7 +314,7 @@ func NewProvider(buf InfoProvider) *Provider {
 }
 
 func (p *Provider) nextRequestID() int {
-	return int(atomic.AddInt64(&p.reqCounter, 1))
+	return int(p.reqCounter.Add(1))
 }
 
 func (p *Provider) SetHTTPTransport(rt http.RoundTripper) {

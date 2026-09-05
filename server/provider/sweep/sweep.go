@@ -119,10 +119,7 @@ func (p *Provider) Build(ctx *provider.RequestState) (*openai.CompletionRequest,
 
 	cursorLineInWindow := ctx.Window.CursorLine
 	codeBlock := strings.Join(ctx.Window.Lines, "\n")
-	relativeCursor := computeRelativeCursor(ctx.Window.Lines, cursorLineInWindow, current.Cursor.Col)
-	if relativeCursor > len(codeBlock) {
-		relativeCursor = len(codeBlock)
-	}
+	relativeCursor := min(computeRelativeCursor(ctx.Window.Lines, cursorLineInWindow, current.Cursor.Col), len(codeBlock))
 
 	startLine := ctx.Window.Start + 1
 	endLine := ctx.Window.Start + len(ctx.Window.Lines)
@@ -211,10 +208,7 @@ func prefillForState(ctx *provider.RequestState) string {
 		return ""
 	}
 	codeBlock := strings.Join(ctx.Window.Lines, "\n")
-	relativeCursor := computeRelativeCursor(ctx.Window.Lines, ctx.Window.CursorLine, ctx.Input.Current.Cursor.Col)
-	if relativeCursor > len(codeBlock) {
-		relativeCursor = len(codeBlock)
-	}
+	relativeCursor := min(computeRelativeCursor(ctx.Window.Lines, ctx.Window.CursorLine, ctx.Input.Current.Cursor.Col), len(codeBlock))
 	return computePrefillForContext(ctx, codeBlock, relativeCursor)
 }
 
@@ -243,19 +237,20 @@ func computePrefill(codeBlock string, relativeCursor int, changesAboveCursor boo
 		}
 
 		// strings.Split consumes the \n delimiter; restore it after the first line
-		result := prefilledLines[0] + "\n"
+		var result strings.Builder
+		result.WriteString(prefilledLines[0] + "\n")
 
 		// Preserve consecutive blank lines but stop at first real content
 		afterSplit := strings.Join(prefilledLines[1:], "\n")
 		for _, ch := range afterSplit {
 			if ch == '\n' {
-				result += "\n"
+				result.WriteString("\n")
 			} else {
 				break
 			}
 		}
 
-		return result
+		return result.String()
 	}
 
 	prefixBeforeCursor := codeBlock[:relativeCursor]
@@ -291,15 +286,9 @@ func getBroadFileContext(current sourcectx.CurrentSnapshot) string {
 
 	cursorLine := current.Cursor.Row - 1 // Convert to 0-indexed
 
-	contextStart := cursorLine - broadContextLinesBefore
-	if contextStart < 0 {
-		contextStart = 0
-	}
+	contextStart := max(cursorLine-broadContextLinesBefore, 0)
 
-	contextEnd := cursorLine + broadContextLinesAfter + 1
-	if contextEnd > len(lines) {
-		contextEnd = len(lines)
-	}
+	contextEnd := min(cursorLine+broadContextLinesAfter+1, len(lines))
 
 	return strings.Join(lines[contextStart:contextEnd], "\n")
 }

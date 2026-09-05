@@ -663,7 +663,7 @@ func TestPartialAccept_MultiLineCompletion_CursorTargetConsistency(t *testing.T)
 		}
 		eng.stagedCompletion = nil
 
-		for i := 0; i < 3; i++ {
+		for i := range 3 {
 			eng.partialAcceptCompletion()
 			if i < 2 {
 				assert.Equal(t, cursorTarget, eng.cursorTarget.LineNumber, "cursor target should be unchanged")

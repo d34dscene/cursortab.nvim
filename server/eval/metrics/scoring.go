@@ -1,7 +1,7 @@
 package metrics
 
 import (
-	"sort"
+	"slices"
 )
 
 // Score bundles the metrics for one (scenario, provider) result.
@@ -52,7 +52,7 @@ func Summarize(scores []Score) Aggregate {
 		}
 		lats = append(lats, s.LatencyMs)
 	}
-	sort.Slice(lats, func(i, j int) bool { return lats[i] < lats[j] })
+	slices.Sort(lats)
 	p50 := lats[n/2]
 	p90Idx := (n * 90) / 100
 	if p90Idx >= n {

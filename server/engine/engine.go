@@ -763,10 +763,7 @@ func metricsTypingSpeed(actions []*types.UserAction) float64 {
 
 func metricsRecentActions(actions []*types.UserAction) []string {
 	recentActions := make([]string, 0, 5)
-	start := len(actions) - 5
-	if start < 0 {
-		start = 0
-	}
+	start := max(len(actions)-5, 0)
 	for _, action := range actions[start:] {
 		if action == nil {
 			continue

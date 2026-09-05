@@ -323,7 +323,7 @@ func renderAfterAcceptPane(b *strings.Builder, sr *stepResult) {
 
 	wrongLines := map[int]bool{}
 	maxLen := max(len(sr.ActualBuffer), len(sr.ExpectedBuffer))
-	for i := 0; i < maxLen; i++ {
+	for i := range maxLen {
 		got := ""
 		if i < len(sr.ActualBuffer) {
 			got = sr.ActualBuffer[i]

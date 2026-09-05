@@ -536,7 +536,7 @@ func TestRejectedCompletionSuppression_LRUCapPerFile(t *testing.T) {
 	eng := createTestEngine(buf, prov, clock)
 
 	// Seed more than the cap directly through rememberRejectedCompletion.
-	for i := 0; i < rejectedCompletionMaxPerFile+5; i++ {
+	for i := range rejectedCompletionMaxPerFile + 5 {
 		eng.display.setRejectionCandidate(&rejectedCompletion{
 			filePath:  buf.Path(),
 			startLine: i + 1,

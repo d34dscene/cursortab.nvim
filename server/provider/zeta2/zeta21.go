@@ -130,10 +130,7 @@ func writeZeta21DiagnosticsPseudoFile(b *strings.Builder, diagnostics *types.Dia
 			continue
 		}
 
-		diagnosticEndLine := diagnostic.Range.EndLine
-		if diagnosticEndLine < diagnostic.Range.StartLine {
-			diagnosticEndLine = diagnostic.Range.StartLine
-		}
+		diagnosticEndLine := max(diagnostic.Range.EndLine, diagnostic.Range.StartLine)
 		if diagnostic.Range.StartLine > editableEndLine || diagnosticEndLine < editableStartLine {
 			continue
 		}
@@ -406,13 +403,13 @@ func decodeZeta21MarkerSpan(ctx *provider.RequestState, output string) (zeta21Ma
 		}
 		return zeta21MarkerSpan{startLine: startLine, endLine: endLine, noEdits: true}, true
 	}
-	if strings.HasPrefix(replacement, "\r\n") {
-		replacement = strings.TrimPrefix(replacement, "\r\n")
+	if after, ok := strings.CutPrefix(replacement, "\r\n"); ok {
+		replacement = after
 	} else {
 		replacement = strings.TrimPrefix(replacement, "\n")
 	}
-	if strings.HasSuffix(replacement, "\r\n") {
-		replacement = strings.TrimSuffix(replacement, "\r\n")
+	if before, ok := strings.CutSuffix(replacement, "\r\n"); ok {
+		replacement = before
 	} else {
 		replacement = strings.TrimSuffix(replacement, "\n")
 	}

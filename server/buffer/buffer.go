@@ -134,12 +134,7 @@ var noHistoryFiles = []string{
 // SkipHistory returns true for files where diff history should not be recorded.
 func (b *NvimBuffer) SkipHistory() bool {
 	base := filepath.Base(b.path)
-	for _, name := range noHistoryFiles {
-		if base == name {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(noHistoryFiles, base)
 }
 
 // FileContext holds the state to restore when switching to a file.

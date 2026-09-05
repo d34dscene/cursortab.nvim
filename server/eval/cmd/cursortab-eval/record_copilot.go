@@ -190,8 +190,8 @@ func captureCopilotForScenario(n *nvim.Nvim, sc *harness.Scenario, attachWait, r
 				return nil, fmt.Errorf("step %d copilotInlineEdit: %w", interactionIdx, err)
 			}
 			elapsed := time.Since(start)
-			if strings.HasPrefix(out, "ERROR:") {
-				return nil, fmt.Errorf("step %d copilot: %s", interactionIdx, strings.TrimPrefix(out, "ERROR:"))
+			if after, ok := strings.CutPrefix(out, "ERROR:"); ok {
+				return nil, fmt.Errorf("step %d copilot: %s", interactionIdx, after)
 			}
 			var probe []json.RawMessage
 			if err := json.Unmarshal([]byte(out), &probe); err != nil {

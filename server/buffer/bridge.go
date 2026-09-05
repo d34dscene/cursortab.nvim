@@ -107,10 +107,7 @@ func (b *NvimBuffer) GetWindsurfInfo() (*WindsurfInfo, error) {
 		return &WindsurfInfo{Healthy: false}, nil
 	}
 
-	port := getNumber(result, "port")
-	if port < 0 {
-		port = 0
-	}
+	port := max(getNumber(result, "port"), 0)
 
 	apiKey, _ := result["api_key"].(string)
 

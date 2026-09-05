@@ -3,6 +3,7 @@ package engine
 import (
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -57,8 +58,8 @@ func (e *Engine) suppressForSingleDeletion() bool {
 
 	// Count consecutive deletions from the end
 	consecutive := 0
-	for i := len(e.userActions) - 1; i >= 0; i-- {
-		if isDeletion(e.userActions[i].ActionType) {
+	for _, v := range slices.Backward(e.userActions) {
+		if isDeletion(v.ActionType) {
 			consecutive++
 		} else {
 			break
@@ -324,7 +325,7 @@ func completionLinesSimilarityStats(a, b []string) (avg, minSim float64) {
 
 	total := 0.0
 	minSim = 1.0
-	for i := 0; i < overlap; i++ {
+	for i := range overlap {
 		sim := text.LineSimilarity(a[i], b[i])
 		total += sim
 		if sim < minSim {

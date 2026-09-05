@@ -208,10 +208,7 @@ func (b *IncrementalStageBuilder) buildFirstStage() *Stage {
 	// Scope old lines to what streaming has covered. oldLineIdx tracks the
 	// last matched old line — everything beyond hasn't been seen yet and
 	// would appear as spurious deletions.
-	endOld := b.diffBuilder.oldLineIdx
-	if endOld > len(b.OldLines) {
-		endOld = len(b.OldLines)
-	}
+	endOld := min(b.diffBuilder.oldLineIdx, len(b.OldLines))
 	partialOldLines := b.OldLines[:endOld]
 
 	oldText := JoinLines(partialOldLines)

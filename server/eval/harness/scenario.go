@@ -266,7 +266,7 @@ func ParseScenario(data []byte, targets map[string]Target) (*Scenario, error) {
 
 	var targetNames []string
 	if v, ok := hdr["targets"]; ok {
-		for _, p := range strings.Split(v, ",") {
+		for p := range strings.SplitSeq(v, ",") {
 			p = strings.TrimSpace(p)
 			if p != "" {
 				targetNames = append(targetNames, p)
@@ -368,7 +368,7 @@ func extForLanguage(lang string) string {
 // parseCursorPositions parses "row:col, row:col, ..." into position pairs.
 func parseCursorPositions(s string) ([][2]int, error) {
 	var out [][2]int
-	for _, p := range strings.Split(s, ",") {
+	for p := range strings.SplitSeq(s, ",") {
 		p = strings.TrimSpace(p)
 		if p == "" {
 			continue

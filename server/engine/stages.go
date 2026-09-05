@@ -26,10 +26,7 @@ func stageIsPureInsertion(stage *text.Stage) bool {
 // nothing: input slices are copied.
 func applyStageToLines(lines []string, stage *text.Stage) []string {
 	isPure := stageIsPureInsertion(stage)
-	start := stage.BufferStart - 1
-	if start < 0 {
-		start = 0
-	}
+	start := max(stage.BufferStart-1, 0)
 
 	if isPure {
 		if start > len(lines) {
@@ -42,10 +39,7 @@ func applyStageToLines(lines []string, stage *text.Stage) []string {
 		return out
 	}
 
-	end := stage.BufferEnd
-	if end > len(lines) {
-		end = len(lines)
-	}
+	end := min(stage.BufferEnd, len(lines))
 	if start > end {
 		start = end
 	}

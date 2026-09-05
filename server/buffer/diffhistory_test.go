@@ -11,7 +11,7 @@ func TestAppendAndCoalesce_FIFOCap(t *testing.T) {
 	var history []*types.DiffEntry
 
 	// Add 7 entries with different timestamps (spread apart to prevent coalescing)
-	for i := 0; i < 7; i++ {
+	for i := range 7 {
 		entry := &types.DiffEntry{
 			Original:    "old",
 			Updated:     "new",

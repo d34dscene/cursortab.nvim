@@ -248,7 +248,7 @@ func TestAnchorTruncation(t *testing.T) {
 func TestValidateAnchorPosition(t *testing.T) {
 	// Create 20 unique lines
 	oldLines := make([]string, 20)
-	for i := 0; i < len(oldLines); i++ {
+	for i := range oldLines {
 		oldLines[i] = "line " + string(rune('A'+i)) // unique content per line
 	}
 
@@ -285,7 +285,7 @@ func TestValidateAnchorPosition(t *testing.T) {
 func TestFirstLineAnchorChecker(t *testing.T) {
 	// Create 20 unique lines
 	oldLines := make([]string, 20)
-	for i := 0; i < len(oldLines); i++ {
+	for i := range oldLines {
 		oldLines[i] = "line " + string(rune('A'+i)) // unique content per line
 	}
 
