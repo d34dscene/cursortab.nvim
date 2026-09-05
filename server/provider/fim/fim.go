@@ -30,7 +30,7 @@ var _ provider.OpenAIStreamFlow = (*Provider)(nil)
 
 func NewProvider(config *types.ProviderConfig) *Provider {
 	materials := sourcectx.Materials{sourcectx.Treesitter{}}
-	if config.FIMTokens != nil && config.FIMTokens.FileSep != "" {
+	if config.FIMTokens != nil && (config.FIMTokens.FileSep != "" || config.FIMTokens.Filename != "") {
 		materials = append(materials,
 			sourcectx.Diagnostics{}, sourcectx.GitDiff{},
 			sourcectx.RecentFiles{}, sourcectx.EditHistory{},
@@ -98,8 +98,9 @@ func (p *Provider) Build(ctx *provider.RequestState) (*openai.CompletionRequest,
 	// Tokenized FIM mode: concatenate tokens into a single prompt
 	var prompt strings.Builder
 
-	// Repo-level cross-file context (when repo_name and file_sep are configured)
-	if tokens.RepoName != "" && tokens.FileSep != "" {
+	// Repo-level cross-file context (Qwen style with repo_name+file_sep, or
+	// Mellum style with filename headers)
+	if tokens.RepoName != "" || tokens.Filename != "" {
 		buildRepoContext(&prompt, p, ctx)
 	}
 
@@ -128,11 +129,20 @@ func (p *Provider) Build(ctx *provider.RequestState) (*openai.CompletionRequest,
 }
 
 // buildRepoContext prepends cross-file context using repo-level FIM tokens.
+// Qwen style (repo_name+file_sep) supports rich sections (diagnostics,
+// treesitter, diffs). Mellum style (filename headers) was verified to work
+// best with plain per-file content blocks before the FIM tokens.
 func buildRepoContext(b *strings.Builder, p *Provider, ctx *provider.RequestState) {
 	input := ctx.Input
 	current := input.Current
-	fileSep := p.ProviderConfig().FIMTokens.FileSep
-	repoName := p.ProviderConfig().FIMTokens.RepoName
+	tokens := p.ProviderConfig().FIMTokens
+	if tokens.Filename != "" {
+		buildFilenameContext(b, p, ctx)
+		return
+	}
+
+	fileSep := tokens.FileSep
+	repoName := tokens.RepoName
 
 	// Repo name header
 	workspace := filepath.Base(current.WorkspacePath)
@@ -202,6 +212,27 @@ func buildRepoContext(b *strings.Builder, p *Provider, ctx *provider.RequestStat
 	// Current file header
 	b.WriteString(fileSep)
 	b.WriteString(current.File.Path)
+	b.WriteString("\n")
+}
+
+// buildFilenameContext emits cross-file context in Mellum's format: one
+// "<filename>path\n<content>" block per recent file, then the current file
+// header right before the FIM tokens. Only file content is included; the
+// rich Qwen-style sections (diagnostics, treesitter, diffs) have no verified
+// counterpart in Mellum's training format.
+func buildFilenameContext(b *strings.Builder, p *Provider, ctx *provider.RequestState) {
+	tokens := p.ProviderConfig().FIMTokens
+	if recent, ok := sourcectx.Find[sourcectx.RecentFiles](ctx.Input.Materials); ok {
+		for _, snap := range recent.Files {
+			b.WriteString(tokens.Filename)
+			b.WriteString(snap.FilePath)
+			b.WriteString("\n")
+			b.WriteString(strings.Join(snap.Lines, "\n"))
+			b.WriteString("\n")
+		}
+	}
+	b.WriteString(tokens.Filename)
+	b.WriteString(ctx.Input.Current.File.Path)
 	b.WriteString("\n")
 }
 

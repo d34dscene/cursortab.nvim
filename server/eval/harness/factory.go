@@ -82,6 +82,18 @@ func BuildProviderForTarget(t Target, baseCfg *types.ProviderConfig, transport h
 				cfg.FIMTokens.FileSep = "<|file_sep|>"
 			}
 		}
+		// Mellum uses suffix-first token order and filename-tagged cross-file
+		// context (JetBrains card format).
+		isMellum := strings.Contains(strings.ToLower(cfg.ProviderModel), "mellum")
+		if cfg.FIMTokens == nil && isMellum {
+			cfg.FIMTokens = &types.FIMTokenConfig{
+				Prefix:      "<fim_prefix>",
+				Suffix:      "<fim_suffix>",
+				Middle:      "<fim_middle>",
+				Filename:    "<filename>",
+				SuffixFirst: true,
+			}
+		}
 		p := fim.NewProvider(cfg)
 		p.SetHTTPTransport(transport)
 		return p, nil

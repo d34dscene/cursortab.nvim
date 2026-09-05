@@ -219,6 +219,43 @@ func TestBuildPrompt_RepoContext(t *testing.T) {
 	assert.True(t, strings.Contains(req.Prompt, "<PRE>hello<SUF> world<MID>"), "should have FIM tokens at end")
 }
 
+func TestBuildPrompt_FilenameContext(t *testing.T) {
+	config := &types.ProviderConfig{
+		ProviderModel: "test-model",
+		FIMTokens: &types.FIMTokenConfig{
+			Prefix:      "<PRE>",
+			Suffix:      "<SUF>",
+			Middle:      "<MID>",
+			Filename:    "<filename>",
+			SuffixFirst: true,
+		},
+	}
+	p := NewProvider(config)
+
+	input := completionInput([]string{"hello world"}, 1, 5)
+	input.Current.WorkspacePath = "/home/user/myproject"
+	input.Current.File.Path = "config_tool.py"
+	input.Materials = sourcectx.Materials{
+		sourcectx.RecentFiles{Files: []*types.RecentBufferSnapshot{
+			{FilePath: "utils.py", Lines: []string{"import os", "", "def atomic_write(path, data):"}},
+		}},
+		sourcectx.Diagnostics{Data: &types.Diagnostics{
+			Items: []*types.Diagnostic{
+				{Message: "undefined: foo", Severity: types.SeverityError, Source: "gopls", Range: &types.CursorRange{StartLine: 10}},
+			},
+		}},
+	}
+	ctx := stateForInput(input)
+
+	req := buildPromptForTest(p, ctx)
+
+	assert.True(t, strings.Contains(req.Prompt, "<filename>utils.py\nimport os"), "should have recent file block")
+	assert.True(t, strings.Contains(req.Prompt, "<filename>config_tool.py\n"), "should have current file header")
+	assert.False(t, strings.Contains(req.Prompt, "context/diagnostics"), "should not include Qwen-style diagnostic sections")
+	assert.False(t, strings.Contains(req.Prompt, "repo_name"), "should not include repo_name token")
+	assert.True(t, strings.HasSuffix(req.Prompt, "<SUF> world<PRE>hello<MID>"), "FIM tokens should follow the context blocks in suffix_first order")
+}
+
 func TestBuildPrompt_NoRepoContextWithoutTokens(t *testing.T) {
 	config := &types.ProviderConfig{
 		ProviderModel: "test-model",
