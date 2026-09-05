@@ -367,6 +367,30 @@ require("cursortab").setup({
 })
 ```
 
+Models with a non-standard token order (Mellum, SeedCoder) emit the suffix
+before the prefix. Use a preset instead of spelling out every token:
+
+```lua
+require("cursortab").setup({
+  provider = {
+    type = "fim",
+    url = "http://localhost:8000",
+    fim_tokens = "mellum",
+  },
+})
+```
+
+Equivalent to the full form:
+
+```lua
+    fim_tokens = {
+      prefix = "<fim_prefix>",
+      suffix = "<fim_suffix>",
+      middle = "<fim_middle>",
+      suffix_first = true,
+    },
+```
+
 ```bash
 llama-server -hf unsloth/Qwen3.5-0.8B-GGUF:Q8_0 --port 8000
 ```

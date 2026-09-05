@@ -49,7 +49,7 @@
 ---@field completion_timeout integer
 ---@field max_diff_history_tokens integer
 ---@field completion_path string API endpoint path (e.g., "/v1/completions")
----@field fim_tokens CursortabFIMTokensConfig|nil FIM tokens configuration (optional)
+---@field fim_tokens CursortabFIMTokensConfig|string|nil FIM tokens configuration, a preset name ("mellum"), or nil
 ---@field privacy_mode boolean Enable privacy mode (don't send telemetry to provider)
 
 ---@class CursortabDebugConfig
@@ -149,7 +149,8 @@ local default_config = {
 		max_diff_history_tokens = 512, -- Max tokens for diff history (0 = no limit)
 		completion_path = "/v1/completions", -- API endpoint path
 		-- fim_tokens is optional. Omit (the default) to use OpenAI prompt+suffix
-		-- format (e.g. DeepSeek). Set it to opt into tokenized FIM:
+		-- format (e.g. DeepSeek). Set it to opt into tokenized FIM, either as a
+		-- preset name (fim_tokens = "mellum") or a full table:
 		--   fim_tokens = {
 		--     prefix = "<|fim_prefix|>",
 		--     suffix = "<|fim_suffix|>",
@@ -293,6 +294,18 @@ local valid_provider_types = {
 }
 local valid_log_levels = { trace = true, debug = true, info = true, warn = true, error = true }
 local valid_addition_styles = { dimmed = true, highlight = true }
+
+-- Known FIM token layouts. Lets users write fim_tokens = "mellum" instead of
+-- spelling out every token. Values are resolved into fim_tokens tables during
+-- setup, before validation and the daemon config JSON are built.
+local fim_presets = {
+	mellum = {
+		prefix = "<fim_prefix>",
+		suffix = "<fim_suffix>",
+		middle = "<fim_middle>",
+		suffix_first = true,
+	},
+}
 
 -- Documented optional keys that stay nil in default_config, so the default-key
 -- validator would otherwise reject them.
@@ -481,6 +494,22 @@ end
 ---@return CursortabConfig
 function config.setup(user_config)
 	local migrated = migrate_deprecated_config(user_config or {})
+
+	-- Resolve FIM token presets (e.g. fim_tokens = "mellum") into token tables
+	if type(migrated.provider) == "table" and type(migrated.provider.fim_tokens) == "string" then
+		local preset = fim_presets[migrated.provider.fim_tokens]
+		if not preset then
+			local names = vim.tbl_keys(fim_presets)
+			table.sort(names)
+			error(string.format(
+				"[cursortab.nvim] provider.fim_tokens preset %q not found. Available presets: %s",
+				migrated.provider.fim_tokens,
+				table.concat(names, ", ")
+			))
+		end
+		migrated.provider.fim_tokens = vim.deepcopy(preset)
+	end
+
 	validate_config(migrated)
 	current_config = vim.tbl_deep_extend("force", vim.deepcopy(default_config), migrated)
 
