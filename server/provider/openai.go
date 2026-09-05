@@ -105,7 +105,10 @@ type OpenAIStreamArgs struct {
 	OldLines           []string
 	Prefill            string
 	FirstLineValidator func(*RequestState, string) error
-	LineTransform      func(string) (string, bool)
+	LineTransform      func(string) (string, bool, error)
+	// FinalLine emits one last line after the stream ends. Used by transforms
+	// that hold back a line until they know it is the last one.
+	FinalLine func() (string, bool)
 }
 
 type OpenAIStreamFlow interface {
@@ -126,7 +129,8 @@ type lineStreamSession struct {
 
 	prefill            string
 	firstLineValidator func(*RequestState, string) error
-	lineTransform      func(string) (string, bool)
+	lineTransform      func(string) (string, bool, error)
+	finalLine          func() (string, bool)
 	parse              func(*RequestState, *openai.CompletionResult) (*types.CompletionResponse, error)
 	state              *RequestState
 
@@ -160,6 +164,7 @@ func (o OpenAI) startStream(
 		prefill:            args.Prefill,
 		firstLineValidator: args.FirstLineValidator,
 		lineTransform:      args.LineTransform,
+		finalLine:          args.FinalLine,
 		parse:              parse,
 		state:              state,
 	}
@@ -206,7 +211,7 @@ func (s *lineStreamSession) forward() {
 	defer close(s.lines)
 
 	if s.prefill != "" {
-		for _, line := range strings.Split(strings.TrimSuffix(s.prefill, "\n"), "\n") {
+		for line := range strings.SplitSeq(strings.TrimSuffix(s.prefill, "\n"), "\n") {
 			if !s.send(line) {
 				return
 			}
@@ -217,9 +222,21 @@ func (s *lineStreamSession) forward() {
 		line := rawLine
 		emit := true
 		if s.lineTransform != nil {
-			line, emit = s.lineTransform(rawLine)
+			var err error
+			line, emit, err = s.lineTransform(rawLine)
+			if err != nil {
+				s.err = err
+				s.Cancel()
+				return
+			}
 		}
 		if emit && !s.emit(line) {
+			return
+		}
+	}
+
+	if s.finalLine != nil {
+		if line, emit := s.finalLine(); emit && !s.emit(line) {
 			return
 		}
 	}

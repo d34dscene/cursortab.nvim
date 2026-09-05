@@ -3,6 +3,7 @@ package fim
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -23,7 +24,9 @@ type Provider struct {
 }
 
 var _ engine.Provider = (*Provider)(nil)
+var _ engine.StreamingProvider = (*Provider)(nil)
 var _ provider.CompletionFlow[*openai.CompletionRequest, *openai.CompletionResult] = (*Provider)(nil)
+var _ provider.OpenAIStreamFlow = (*Provider)(nil)
 
 func NewProvider(config *types.ProviderConfig) *Provider {
 	materials := sourcectx.Materials{sourcectx.Treesitter{}}
@@ -42,6 +45,20 @@ func NewProvider(config *types.ProviderConfig) *Provider {
 
 func (p *Provider) Complete(ctx context.Context, input sourcectx.CompletionInput) (*types.CompletionResponse, error) {
 	return provider.StartBatch(ctx, input, p.ProviderConfig(), p)
+}
+
+func (p *Provider) StreamCompletion(ctx context.Context, input sourcectx.CompletionInput) (engine.CompletionStream, error) {
+	return p.StartStream(ctx, input, p.ProviderConfig(), p)
+}
+
+func (p *Provider) StreamArgs(state *provider.RequestState) provider.OpenAIStreamArgs {
+	windowStart, oldLines, transform := fimStreamWindow(state)
+	return provider.OpenAIStreamArgs{
+		WindowStart:   windowStart,
+		OldLines:      oldLines,
+		LineTransform: transform.emit,
+		FinalLine:     transform.finalLine,
+	}
 }
 
 func (p *Provider) Build(ctx *provider.RequestState) (*openai.CompletionRequest, error) {
@@ -327,4 +344,148 @@ func stripSuffixOverlap(completion, suffix string) string {
 		return completion[:len(completion)-best]
 	}
 	return completion
+}
+
+// fimStreamWindow scopes the stream to the cursor line. Raw FIM output lines
+// are insertion content; the transform attaches the text before the cursor to
+// the first line and defers the text after the cursor to the last line, so
+// the streamed lines match what Parse produces for the accumulated text.
+func fimStreamWindow(state *provider.RequestState) (int, []string, *fimStreamTransform) {
+	current := state.Input.Current
+	lines := state.Window.Lines
+	cursorLineIdx := state.Window.CursorLine
+	if len(lines) == 0 {
+		lines = current.File.Lines
+		cursorLineIdx = current.Cursor.Row - 1
+	}
+
+	cursorLine := ""
+	if cursorLineIdx >= 0 && cursorLineIdx < len(lines) {
+		cursorLine = lines[cursorLineIdx]
+	}
+	col := max(0, min(current.Cursor.Col, len(cursorLine)))
+
+	row := current.Cursor.Row
+	fileLines := current.File.Lines
+	currentFileLine := ""
+	if row >= 1 && row <= len(fileLines) {
+		currentFileLine = fileLines[row-1]
+	}
+	fileCol := max(0, min(current.Cursor.Col, len(currentFileLine)))
+
+	return state.Window.Start + cursorLineIdx, []string{cursorLine}, &fimStreamTransform{
+		before:           cursorLine[:col],
+		after:            cursorLine[col:],
+		atEOL:            fileCol >= len(strings.TrimRight(currentFileLine, " \t")),
+		suffixHasContent: suffixAfterCursorHasContent(currentFileLine, fileCol, fileLines, row),
+	}
+}
+
+func suffixAfterCursorHasContent(currentLine string, col int, fileLines []string, row int) bool {
+	var b strings.Builder
+	b.WriteString(currentLine[col:])
+	for i := row; i < len(fileLines); i++ {
+		b.WriteString("\n")
+		b.WriteString(fileLines[i])
+	}
+	return strings.TrimSpace(b.String()) != ""
+}
+
+var errLeadingNewline = errors.New("fim: completion starts a new line although content follows the cursor")
+
+// fimStreamTransform converts raw FIM insertion lines into the replacement
+// lines for the cursor line. Parse (used by Finish) attaches the after-cursor
+// text to the first generated line when it has content, otherwise to the last
+// line, and strips a trailing overlap with the text after the cursor from
+// wherever the completion ends. The first two are decidable at the first
+// line; the strip only applies to the completion's end, so lines that might
+// be regenerating the after-cursor text are held back until the stream ends.
+type fimStreamTransform struct {
+	before string
+	after  string
+
+	atEOL            bool
+	suffixHasContent bool
+
+	firstSeen    bool
+	firstEmitted bool
+	afterPlaced  bool
+	held         string
+	isFirstHeld  bool
+	hasHeld      bool
+}
+
+func (t *fimStreamTransform) emit(line string) (string, bool, error) {
+	if !t.firstSeen {
+		t.firstSeen = true
+		if t.atEOL && line == "" && t.suffixHasContent {
+			// Mirrors rejectLeadingNewlineWithSuffixText for batch requests.
+			return "", false, errLeadingNewline
+		}
+		if line != "" && !endsWithAfterPrefix(line, t.after) {
+			t.firstEmitted = true
+			t.afterPlaced = true
+			return t.before + line + t.after, true, nil
+		}
+		t.hold(line, true)
+		return "", false, nil
+	}
+
+	if t.hasHeld {
+		emitted := t.release()
+		t.hold(line, false)
+		return emitted, true, nil
+	}
+
+	t.hold(line, false)
+	return "", false, nil
+}
+
+// endsWithAfterPrefix reports whether the line ends with a non-empty prefix of
+// after. Such a line may be regenerating text that already follows the cursor;
+// whether to strip it depends on whether more lines follow.
+func endsWithAfterPrefix(line, after string) bool {
+	maxK := min(len(line), len(after))
+	for k := 1; k <= maxK; k++ {
+		if line[len(line)-k:] == after[:k] {
+			return true
+		}
+	}
+	return false
+}
+
+func (t *fimStreamTransform) hold(line string, isFirst bool) {
+	t.held = line
+	t.isFirstHeld = isFirst
+	t.hasHeld = true
+}
+
+func (t *fimStreamTransform) release() string {
+	var line string
+	if t.isFirstHeld {
+		line = t.before + t.held
+		if t.held != "" {
+			line += t.after
+			t.afterPlaced = true
+		}
+	} else {
+		line = t.held
+	}
+	t.firstEmitted = true
+	t.hasHeld = false
+	return line
+}
+
+func (t *fimStreamTransform) finalLine() (string, bool) {
+	if !t.hasHeld {
+		return "", false
+	}
+	line := stripSuffixOverlap(t.held, t.after)
+	if !t.firstEmitted {
+		line = t.before + line
+	}
+	if !t.afterPlaced {
+		line += t.after
+	}
+	return line, true
 }

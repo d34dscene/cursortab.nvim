@@ -68,7 +68,7 @@ func (p *Provider) Complete(ctx context.Context, input sourcectx.CompletionInput
 }
 
 func (p *Provider) StreamCompletion(ctx context.Context, input sourcectx.CompletionInput) (engine.CompletionStream, error) {
-	return p.OpenAI.StartStream(ctx, input, p.ProviderConfig(), p)
+	return p.StartStream(ctx, input, p.ProviderConfig(), p)
 }
 
 func (p *Provider) Build(ctx *provider.RequestState) (*openai.CompletionRequest, error) {
@@ -191,14 +191,8 @@ func computeEditableRange(trimmed []string, cursorLine, windowStart int, syntaxR
 		cursorLine = len(trimmed) - 1
 	}
 
-	start := cursorLine - editableLinesBefore
-	if start < 0 {
-		start = 0
-	}
-	end := cursorLine + 1 + editableLinesAfter
-	if end > len(trimmed) {
-		end = len(trimmed)
-	}
+	start := max(cursorLine-editableLinesBefore, 0)
+	end := min(cursorLine+1+editableLinesAfter, len(trimmed))
 
 	if len(syntaxRanges) > 0 {
 		shifted := make([]*types.LineRange, 0, len(syntaxRanges))
@@ -249,10 +243,7 @@ func formatEditableWithCursor(editLines []string, cursorRelLine, cursorCol int) 
 	lines := make([]string, len(editLines))
 	copy(lines, editLines)
 	line := lines[cursorRelLine]
-	col := cursorCol
-	if col > len(line) {
-		col = len(line)
-	}
+	col := min(cursorCol, len(line))
 	if col < 0 {
 		col = 0
 	}
@@ -471,10 +462,7 @@ func stripCursorMarker(text, marker string) string {
 }
 
 func buildCursorTarget(ctx *provider.RequestState, editableStart, markerLine int, newLines []string) *types.CursorPredictionTarget {
-	lineIdx := markerLine
-	if lineIdx < 0 {
-		lineIdx = 0
-	}
+	lineIdx := max(markerLine, 0)
 	if lineIdx >= len(newLines) {
 		lineIdx = len(newLines) - 1
 	}
@@ -532,12 +520,12 @@ func parseCompletionWithCursorMarker(
 	return resp
 }
 
-func visibleStreamLine(line string) (string, bool) {
+func visibleStreamLine(line string) (string, bool, error) {
 	if !strings.Contains(line, cursorMarker) {
-		return line, true
+		return line, true, nil
 	}
 	stripped := strings.ReplaceAll(line, cursorMarker, "")
-	return stripped, strings.TrimSpace(stripped) != ""
+	return stripped, strings.TrimSpace(stripped) != "", nil
 }
 
 func cursorMarkerPosition(raw string) (int, bool) {

@@ -6,6 +6,7 @@ import (
 	sourcectx "cursortab/ctx"
 	"cursortab/provider"
 	"cursortab/types"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -265,12 +266,7 @@ func TestBuildPrompt_RepoContextStops(t *testing.T) {
 }
 
 func containsStr(slice []string, s string) bool {
-	for _, v := range slice {
-		if v == s {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(slice, s)
 }
 
 func TestBuildPromptPromptSuffix_EmptyLines(t *testing.T) {
@@ -368,4 +364,110 @@ func TestBuildPrompt_SuffixFirst(t *testing.T) {
 
 	assert.Equal(t, "<SUF>\nafter<PRE>before\ncur<MID>", req.Prompt, "suffix-first envelope puts suffix content before prefix content")
 	assert.Equal(t, []string{"<PRE>", "<SUF>", "<MID>"}, req.Stop, "stop tokens unchanged")
+}
+
+func streamTransformFor(t *testing.T, lines []string, cursorRow, cursorCol int) *fimStreamTransform {
+	t.Helper()
+	state := stateForLines(lines, cursorRow, cursorCol, nil)
+	_, _, transform := fimStreamWindow(state)
+	return transform
+}
+
+func parseTestProvider() *Provider {
+	return NewProvider(&types.ProviderConfig{ProviderModel: "test-model"})
+}
+
+// streamedLines runs raw FIM output through the stream transform and returns
+// the emitted replacement lines in order.
+func streamedLines(t *testing.T, transform *fimStreamTransform, raw []string) []string {
+	t.Helper()
+	var out []string
+	for _, line := range raw {
+		emitted, emit, err := transform.emit(line)
+		assert.NoError(t, err, "transform emit")
+		if emit {
+			out = append(out, emitted)
+		}
+	}
+	if line, emit := transform.finalLine(); emit {
+		out = append(out, line)
+	}
+	return out
+}
+
+func TestStreamWindow_CoversCursorLine(t *testing.T) {
+	lines := []string{"func a() {", "\treturn 1", "}"}
+	state := stateForLines(lines, 2, 9, nil)
+	windowStart, oldLines, _ := fimStreamWindow(state)
+	assert.Equal(t, 1, windowStart, "window starts at cursor line index")
+	assert.Equal(t, []string{"\treturn 1"}, oldLines, "old lines are the cursor line")
+}
+
+func TestStreamTransform_SingleLineAttachesBeforeAndAfter(t *testing.T) {
+	transform := streamTransformFor(t, []string{"x = foo()", "y"}, 1, 8)
+	got := streamedLines(t, transform, []string{"1 + 2"})
+	assert.Equal(t, []string{"x = foo(1 + 2)"}, got, "before and after attached to first line")
+}
+
+func TestStreamTransform_MultiLineFirstLineHasContent(t *testing.T) {
+	transform := streamTransformFor(t, []string{"x = foo()", "y = 2"}, 1, 8)
+	got := streamedLines(t, transform, []string{"1,", "2"})
+	assert.Equal(t, []string{"x = foo(1,)", "2"}, got, "after attaches to first line only")
+}
+
+func TestStreamTransform_EmptyFirstLineHoldsLinesUntilEnd(t *testing.T) {
+	transform := streamTransformFor(t, []string{"x = foo()", "y = 2"}, 1, 8)
+	got := streamedLines(t, transform, []string{"", "1", "2"})
+	assert.Equal(t, []string{"x = foo(", "1", "2)"}, got, "after attaches to last line")
+}
+
+func TestStreamTransform_EmptyStreamEmitsNothing(t *testing.T) {
+	transform := streamTransformFor(t, []string{"x = 1", "y = 2"}, 1, 5)
+	got := streamedLines(t, transform, nil)
+	assert.Equal(t, 0, len(got), "empty stream emits nothing")
+}
+
+func TestStreamTransform_RejectsLeadingNewlineWithSuffixContent(t *testing.T) {
+	transform := streamTransformFor(t, []string{"x = foo()", "y = 2"}, 1, 9)
+	_, _, err := transform.emit("")
+	assert.Error(t, err, "leading newline with remaining suffix is rejected")
+}
+
+func TestStreamTransform_AllowsLeadingNewlineWithoutSuffixContent(t *testing.T) {
+	lines := []string{"func a() {"}
+	transform := streamTransformFor(t, lines, 1, 10)
+	got := streamedLines(t, transform, []string{"", "\treturn 1"})
+	assert.Equal(t, []string{"func a() {", "\treturn 1"}, got, "newline fill at EOF is allowed")
+}
+
+func TestStreamTransform_MatchesParseForRawCompletion(t *testing.T) {
+	cases := []struct {
+		name  string
+		lines []string
+		row   int
+		col   int
+		raw   []string
+	}{
+		{"single line", []string{"x = foo()", "y = 2"}, 1, 8, []string{"1 + 2)"}},
+		{"multi line first has content", []string{"x = foo()", "y = 2"}, 1, 8, []string{"1,", "2)"}},
+		{"empty first line", []string{"x = foo()", "y = 2"}, 1, 8, []string{"", "1", "2)"}},
+		{"mid line insertion", []string{"f(a, b)", "next"}, 1, 4, []string{"c"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			transform := streamTransformFor(t, tc.lines, tc.row, tc.col)
+			streamed := streamedLines(t, transform, tc.raw)
+
+			state := stateForLines(tc.lines, tc.row, tc.col, nil)
+			resp := parseCompletion(parseTestProvider(), state, &openai.CompletionResult{
+				Text:         strings.Join(tc.raw, "\n"),
+				FinishReason: "stop",
+			})
+			var parsed []string
+			if resp.Completion != nil {
+				parsed = resp.Completion.Lines
+			}
+			assert.Equal(t, parsed, streamed, "streamed lines match Parse output")
+		})
+	}
 }

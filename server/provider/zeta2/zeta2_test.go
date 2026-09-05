@@ -532,15 +532,18 @@ func TestWriteGitDiffPseudoFile_Format(t *testing.T) {
 // --- Cursor-marker streaming strip & CursorTarget capture ---
 
 func TestVisibleStreamLine_StripsCursorMarker(t *testing.T) {
-	line, emit := visibleStreamLine("plain")
+	line, emit, err := visibleStreamLine("plain")
+	assert.Nil(t, err, "no error for plain line")
 	assert.Equal(t, "plain", line, "plain line")
 	assert.True(t, emit, "plain line emitted")
 
-	line, emit = visibleStreamLine("  " + cursorMarker + "  ")
+	line, emit, err = visibleStreamLine("  " + cursorMarker + "  ")
+	assert.Nil(t, err, "no error for marker-only line")
 	assert.Equal(t, "    ", line, "marker-only line stripped")
 	assert.False(t, emit, "marker-only line dropped")
 
-	line, emit = visibleStreamLine("pre" + cursorMarker + "post")
+	line, emit, err = visibleStreamLine("pre" + cursorMarker + "post")
+	assert.Nil(t, err, "no error for inline marker")
 	assert.Equal(t, "prepost", line, "inline marker stripped")
 	assert.True(t, emit, "content line emitted")
 }

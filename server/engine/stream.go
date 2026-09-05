@@ -133,6 +133,16 @@ func (e *Engine) handleStreamCompleteSimple() {
 	}
 	e.cancelCurrentRequest()
 
+	// The provider's Parse rejected the accumulated text (e.g. FIM suffix
+	// overlap stripped to empty) although streaming already built stages from
+	// the raw lines. Batch requests would have shown nothing; drop the
+	// completion for parity.
+	if streamResponse != nil &&
+		streamResponse.Completion == nil && streamResponse.CursorTarget == nil {
+		e.reject()
+		return
+	}
+
 	stagingResult := ss.StageBuilder.Finalize()
 	if streamResponse != nil && streamResponse.CursorTarget != nil && stagingResult != nil && len(stagingResult.Stages) > 0 {
 		stagingResult.Stages[len(stagingResult.Stages)-1].CursorTarget = streamResponse.CursorTarget
