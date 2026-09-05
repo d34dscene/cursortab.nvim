@@ -12,15 +12,6 @@ local ns_id = vim.api.nvim_create_namespace("cursortab")
 local is_enabled = true
 
 local is_windows = vim.fn.has("win32") == 1 or vim.fn.has("win64") == 1
-local ffi = require("ffi")
-
-if is_windows then
-	ffi.cdef([[
-		void* __stdcall OpenProcess(uint32_t dwDesiredAccess, int bInheritHandle, uint32_t dwProcessId);
-		int __stdcall CloseHandle(void* hObject);
-		int __stdcall GetExitCodeProcess(void* hProcess, uint32_t* lpExitCode);
-	]])
-end
 
 local function get_ipc_path(state_dir)
 	if is_windows then
@@ -32,21 +23,7 @@ end
 
 -- Check if process with given PID is running
 local function is_process_running(pid)
-	if is_windows then
-		local PROCESS_QUERY_INFORMATION = 0x0400
-		local STILL_ACTIVE = 259
-		local h = ffi.C.OpenProcess(PROCESS_QUERY_INFORMATION, false, pid)
-		if h == ffi.NULL or h == nil then
-			return false
-		end
-		local exitCode = ffi.new("uint32_t[1]")
-		ffi.C.GetExitCodeProcess(h, exitCode)
-		ffi.C.CloseHandle(h)
-		return exitCode[0] == STILL_ACTIVE
-	else
-		vim.fn.system("kill -0 " .. pid .. " 2>/dev/null")
-		return vim.v.shell_error == 0
-	end
+	return vim.uv.kill(pid, 0) == 0
 end
 
 -- Read daemon PID from file and check if it's running
@@ -368,20 +345,8 @@ function daemon.stop_daemon()
 		return true, "Cleaned up stale files (process not running)"
 	end
 
-	-- Send TERM signal to daemon
-	local kill_sent
-	if is_windows then
-		vim.fn.system("taskkill /PID " .. pid)
-		kill_sent = vim.v.shell_error == 0
-	else
-		vim.fn.system("kill " .. pid .. " 2>/dev/null")
-		kill_sent = vim.v.shell_error == 0
-	end
-
-	if not kill_sent then
-		cleanup_stale_files()
-		return true, "Cleaned up stale files (could not signal process)"
-	end
+	-- Send TERM signal to daemon (libuv maps this to TerminateProcess on Windows)
+	vim.uv.kill(pid, "sigterm")
 
 	-- Wait for IPC to be removed (daemon cleanup)
 	for _ = 1, 50 do
@@ -393,11 +358,7 @@ function daemon.stop_daemon()
 
 	-- Process didn't terminate gracefully, force kill
 	if is_process_running(pid) then
-		if is_windows then
-			vim.fn.system("taskkill /F /PID " .. pid)
-		else
-			vim.fn.system("kill -9 " .. pid .. " 2>/dev/null")
-		end
+		vim.uv.kill(pid, "sigkill")
 		-- Brief wait for forced termination
 		vim.wait(100)
 	end
