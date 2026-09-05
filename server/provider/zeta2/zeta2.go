@@ -243,10 +243,7 @@ func formatEditableWithCursor(editLines []string, cursorRelLine, cursorCol int) 
 	lines := make([]string, len(editLines))
 	copy(lines, editLines)
 	line := lines[cursorRelLine]
-	col := min(cursorCol, len(line))
-	if col < 0 {
-		col = 0
-	}
+	col := max(min(cursorCol, len(line)), 0)
 	lines[cursorRelLine] = line[:col] + cursorMarker + line[col:]
 
 	return strings.Join(lines, "\n")
