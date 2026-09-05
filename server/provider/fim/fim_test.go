@@ -349,3 +349,23 @@ func TestParseCompletion_SingleLineWithAfterCursor(t *testing.T) {
 	// "func" + "tion" + "()"
 	assert.Equal(t, "function()", resp.Completion.Lines[0], "completion inserted at cursor with suffix")
 }
+
+func TestBuildPrompt_SuffixFirst(t *testing.T) {
+	config := &types.ProviderConfig{
+		ProviderModel: "test-model",
+		FIMTokens: &types.FIMTokenConfig{
+			Prefix:      "<PRE>",
+			Suffix:      "<SUF>",
+			Middle:      "<MID>",
+			SuffixFirst: true,
+		},
+	}
+	p := NewProvider(config)
+
+	ctx := stateForLines([]string{"before", "cur", "after"}, 2, 3, config)
+
+	req := buildPromptForTest(p, ctx)
+
+	assert.Equal(t, "<SUF>\nafter<PRE>before\ncur<MID>", req.Prompt, "suffix-first envelope puts suffix content before prefix content")
+	assert.Equal(t, []string{"<PRE>", "<SUF>", "<MID>"}, req.Stop, "stop tokens unchanged")
+}

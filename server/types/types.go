@@ -194,11 +194,12 @@ const (
 // Prefix/Suffix/Middle must all be set. When nil, the FIM provider uses the
 // OpenAI completions API prompt+suffix format (e.g. DeepSeek).
 type FIMTokenConfig struct {
-	Prefix   string // Token before the prefix content (e.g., "<|fim_prefix|>")
-	Suffix   string // Token before the suffix content (e.g., "<|fim_suffix|>")
-	Middle   string // Token before the middle/completion (e.g., "<|fim_middle|>")
-	RepoName string // Optional repo-level FIM token (e.g., "<|repo_name|>")
-	FileSep  string // Optional file separator token (e.g., "<|file_sep|>")
+	Prefix      string // Token before the prefix content (e.g., "<|fim_prefix|>")
+	Suffix      string // Token before the suffix content (e.g., "<|fim_suffix|>")
+	Middle      string // Token before the middle/completion (e.g., "<|fim_middle|>")
+	RepoName    string // Optional repo-level FIM token (e.g., "<|repo_name|>")
+	FileSep     string // Optional file separator token (e.g., "<|file_sep|>")
+	SuffixFirst bool   // Emit suffix content before prefix content (Mellum, SeedCoder style)
 }
 
 // ProviderConfig holds configuration for providers

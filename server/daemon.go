@@ -74,11 +74,12 @@ func NewDaemon(config Config) (*Daemon, error) {
 
 	if config.Provider.FIMTokens != nil {
 		providerConfig.FIMTokens = &types.FIMTokenConfig{
-			Prefix:   config.Provider.FIMTokens.Prefix,
-			Suffix:   config.Provider.FIMTokens.Suffix,
-			Middle:   config.Provider.FIMTokens.Middle,
-			RepoName: config.Provider.FIMTokens.RepoName,
-			FileSep:  config.Provider.FIMTokens.FileSep,
+			Prefix:      config.Provider.FIMTokens.Prefix,
+			Suffix:      config.Provider.FIMTokens.Suffix,
+			Middle:      config.Provider.FIMTokens.Middle,
+			RepoName:    config.Provider.FIMTokens.RepoName,
+			FileSep:     config.Provider.FIMTokens.FileSep,
+			SuffixFirst: config.Provider.FIMTokens.SuffixFirst,
 		}
 	}
 

@@ -86,11 +86,19 @@ func (p *Provider) Build(ctx *provider.RequestState) (*openai.CompletionRequest,
 		buildRepoContext(&prompt, p, ctx)
 	}
 
-	prompt.WriteString(tokens.Prefix)
-	prompt.WriteString(prefixContent.String())
-	prompt.WriteString(tokens.Suffix)
-	prompt.WriteString(suffixContent.String())
-	prompt.WriteString(tokens.Middle)
+	if tokens.SuffixFirst {
+		prompt.WriteString(tokens.Suffix)
+		prompt.WriteString(suffixContent.String())
+		prompt.WriteString(tokens.Prefix)
+		prompt.WriteString(prefixContent.String())
+		prompt.WriteString(tokens.Middle)
+	} else {
+		prompt.WriteString(tokens.Prefix)
+		prompt.WriteString(prefixContent.String())
+		prompt.WriteString(tokens.Suffix)
+		prompt.WriteString(suffixContent.String())
+		prompt.WriteString(tokens.Middle)
+	}
 
 	stop := []string{tokens.Prefix, tokens.Suffix, tokens.Middle}
 	if tokens.FileSep != "" {
