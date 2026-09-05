@@ -37,6 +37,7 @@ type FIMTokensConfig struct {
 	Middle      string `json:"middle"`
 	RepoName    string `json:"repo_name"`
 	FileSep     string `json:"file_sep"`
+	Filename    string `json:"filename"`
 	SuffixFirst bool   `json:"suffix_first"`
 }
 
@@ -50,6 +51,8 @@ type ProviderConfig struct {
 	ContextSize          int              `json:"context_size"` // Max input context size in tokens (0 = use max_tokens)
 	MaxTokens            int              `json:"max_tokens"`   // Max tokens to generate
 	TopK                 int              `json:"top_k"`
+	MinP                 float64          `json:"min_p"`
+	RepeatPenalty        float64          `json:"repeat_penalty"`
 	CompletionTimeout    int              `json:"completion_timeout"` // in milliseconds
 	MaxDiffHistoryTokens int              `json:"max_diff_history_tokens"`
 	CompletionPath       string           `json:"completion_path"`
@@ -73,9 +76,20 @@ type Config struct {
 	EditorVersion  string         `json:"editor_version"`
 	EditorOS       string         `json:"editor_os"`
 	ContributeData bool           `json:"contribute_data"`
-	Behavior       BehaviorConfig `json:"behavior"`
-	Provider       ProviderConfig `json:"provider"`
-	Debug          DebugConfig    `json:"debug"`
+	Behavior       BehaviorConfig  `json:"behavior"`
+	Provider       ProviderConfig  `json:"provider"`
+	NextEdit       *NextEditConfig `json:"next_edit,omitempty"`
+	Debug          DebugConfig     `json:"debug"`
+}
+
+// NextEditConfig configures the dual-mode second provider: an edit-prediction
+// model consulted while the user pauses with a completion displayed.
+type NextEditConfig struct {
+	Enabled   bool   `json:"enabled"`
+	Type      string `json:"type"`
+	Model     string `json:"model"`
+	URL       string `json:"url"`
+	IdleDelay int    `json:"idle_delay"` // in milliseconds
 }
 
 // validateEnum checks that value is one of the valid options for the named field.

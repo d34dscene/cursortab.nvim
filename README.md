@@ -211,6 +211,8 @@ require("cursortab").setup({
     context_size = 0,                     -- Max input context in tokens (0 = use max_tokens; inline/fim default: 1024)
     max_tokens = 512,                     -- Max tokens to generate (inline default: 64, fim default: 128)
     top_k = 50,                           -- Top-k sampling
+    min_p = 0.0,                          -- Min-p threshold, llama.cpp only (0 = server default)
+    repeat_penalty = 0.0,                 -- Repetition penalty, llama.cpp only (0 = server default)
     completion_timeout = 5000,            -- Timeout in ms for completion requests
     max_diff_history_tokens = 512,        -- Max tokens for diff history (0 = no limit)
     completion_path = "/v1/completions",  -- API endpoint path
@@ -222,8 +224,17 @@ require("cursortab").setup({
     --     middle = "<|fim_middle|>",
     --     repo_name = "<|repo_name|>",     -- optional; auto-detected for Qwen
     --     file_sep = "<|file_sep|>",       -- optional; auto-detected for Qwen
+    --     filename = "<filename>",         -- optional; Mellum per-file context headers
     --   },
     privacy_mode = true,                  -- Don't send telemetry to provider
+  },
+
+  next_edit = {
+    enabled = false,                      -- Second edit-prediction model while you pause
+    type = "zeta-2.1",                    -- "zeta-2.1", "zeta-2", "zeta", or "sweep"
+    model = "",                           -- Model id (empty = provider.model)
+    url = "",                             -- Provider URL override (empty = provider.url)
+    idle_delay = 500,                     -- Ms of no typing before consulting the model
   },
 
   blink = {
@@ -291,8 +302,10 @@ Zeta-2, Zeta (legacy), Copilot, Windsurf, and Mercury API.
 | Recent files        |        | ✓°  |   ✓   |    ✓     |   ✓    |  ✓   |         |          |     ✓      |
 | User actions        |        |     |   ✓   |          |        |      |         |          |            |
 
-° FIM cross-file context requires repo-level tokens (`repo_name`, `file_sep`).
-Auto-detected for Qwen models; set manually for other models that support them.
+° FIM cross-file context requires repo-level tokens (`repo_name`, `file_sep`)
+or the Mellum `filename` token. Auto-detected presets apply for Qwen (via
+`repo_name`/`file_sep`) and Mellum (via the `fim_tokens = "mellum"` preset);
+set manually for other models that support them.
 
 #### Benchmarks
 
@@ -387,9 +400,22 @@ Equivalent to the full form:
       prefix = "<fim_prefix>",
       suffix = "<fim_suffix>",
       middle = "<fim_middle>",
+      filename = "<filename>",
       suffix_first = true,
     },
 ```
+
+The `filename` token enables Mellum-style cross-file context: recently edited
+files are prepended as `<filename>path\n<content>` blocks before the FIM
+tokens. In experiments this measurably improved API accuracy when the answer
+depends on helpers defined in other files.
+```
+
+Note: on llama.cpp servers, the prompt+suffix mode above relies on the FIM
+token metadata in the GGUF. Some models (e.g. Mellum) produce empty or
+degenerate completions through that path with real-sized prompts, but work
+fine with explicit tokens. If completions come back empty on llama.cpp,
+switch to the tokenized mode.
 
 ```bash
 llama-server -hf unsloth/Qwen3.5-0.8B-GGUF:Q8_0 --port 8000
@@ -611,6 +637,32 @@ require("blink.cmp").setup({
 - The plugin automatically shows jump indicators for predicted cursor positions
 - Visual indicators appear for additions, deletions, and completions
 - Off-screen jump targets show directional arrows with distance information
+
+### Dual mode (FIM + next-edit)
+
+With `next_edit.enabled`, the plugin runs a second edit-prediction provider
+alongside the main one. The two are temporally exclusive, so a single Tab
+always accepts whatever is visible:
+
+- While you type, the main provider (e.g. FIM) owns the ghost text.
+- When you pause with a completion displayed, the plugin asks the next-edit
+  model. If it has an edit worth making, it replaces the ghost text; if not,
+  the ghost stays.
+- Any keystroke cancels the next-edit suggestion instantly, and typing
+  re-triggers the main provider.
+- In normal mode, going idle triggers the next-edit model directly.
+
+Both models stay loaded server-side (llama.cpp router with
+`LLAMA_ARG_MODELS_MAX: 2`), so there is no swap cost.
+
+```lua
+next_edit = {
+  enabled = true,
+  type = "zeta-2.1",   -- "zeta-2.1", "zeta-2", "zeta", or "sweep"
+  model = "zeta-2.1.Q4_K_M",
+  idle_delay = 500,    -- ms of no typing before consulting the model
+},
+```
 
 ### Commands
 

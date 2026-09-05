@@ -41,6 +41,37 @@ type Daemon struct {
 	cancel      context.CancelFunc
 }
 
+// buildNextEditProvider constructs the dual-mode second provider. Only
+// edit-prediction providers make sense for it; the main provider keeps its
+// own job (typically FIM insertion while typing).
+func buildNextEditProvider(cfg *NextEditConfig, base *types.ProviderConfig) (engine.Provider, error) {
+	neCfg := *base
+	if cfg.Model != "" {
+		neCfg.ProviderModel = cfg.Model
+	}
+	if cfg.URL != "" {
+		neCfg.ProviderURL = cfg.URL
+	}
+	var prov engine.Provider
+	switch types.ProviderType(cfg.Type) {
+	case types.ProviderTypeSweep:
+		prov = sweep.NewProvider(&neCfg)
+	case types.ProviderTypeZeta:
+		prov = zeta.NewProvider(&neCfg)
+	case types.ProviderTypeZeta2:
+		prov = zeta2.NewProvider(&neCfg)
+	case types.ProviderTypeZeta21:
+		prov = zeta2.NewProvider21(&neCfg)
+	default:
+		return nil, fmt.Errorf(
+			"unsupported next_edit.type %q: must be an edit-prediction provider (zeta-2.1, zeta-2, zeta, sweep)", cfg.Type)
+	}
+	if prov.CompletionKind() != engine.CompletionEdit {
+		return nil, fmt.Errorf("next_edit.type %q is not an edit-prediction provider", cfg.Type)
+	}
+	return prov, nil
+}
+
 func newDaemonContext() (context.Context, context.CancelFunc) {
 	return context.WithCancel(context.Background())
 }
@@ -62,6 +93,8 @@ func NewDaemon(config Config) (*Daemon, error) {
 		ProviderContextSize: config.Provider.ContextSize,
 		ProviderMaxTokens:   config.Provider.MaxTokens,
 		ProviderTopK:        config.Provider.TopK,
+		ProviderMinP:        config.Provider.MinP,
+		ProviderRepeatPen:   config.Provider.RepeatPenalty,
 		CompletionPath:      config.Provider.CompletionPath,
 		CompletionTimeout:   config.Provider.CompletionTimeout,
 		PrivacyMode:         config.Provider.PrivacyMode,
@@ -79,6 +112,7 @@ func NewDaemon(config Config) (*Daemon, error) {
 			Middle:      config.Provider.FIMTokens.Middle,
 			RepoName:    config.Provider.FIMTokens.RepoName,
 			FileSep:     config.Provider.FIMTokens.FileSep,
+			Filename:    config.Provider.FIMTokens.Filename,
 			SuffixFirst: config.Provider.FIMTokens.SuffixFirst,
 		}
 	}
@@ -121,11 +155,24 @@ func NewDaemon(config Config) (*Daemon, error) {
 		)
 	}
 
+	var nextEditProvider engine.Provider
+	idleCompletionDelay := time.Duration(config.Behavior.IdleCompletionDelay) * time.Millisecond
+	if config.NextEdit != nil && config.NextEdit.Enabled {
+		ne, err := buildNextEditProvider(config.NextEdit, providerConfig)
+		if err != nil {
+			return nil, err
+		}
+		nextEditProvider = ne
+		if config.NextEdit.IdleDelay > 0 {
+			idleCompletionDelay = time.Duration(config.NextEdit.IdleDelay) * time.Millisecond
+		}
+	}
+
 	eng, err := engine.NewEngine(prov, buf, engine.EngineConfig{
 		NsID:                config.NsID,
 		ProviderName:        config.Provider.Type,
 		CompletionTimeout:   time.Duration(config.Provider.CompletionTimeout) * time.Millisecond,
-		IdleCompletionDelay: time.Duration(config.Behavior.IdleCompletionDelay) * time.Millisecond,
+		IdleCompletionDelay: idleCompletionDelay,
 		TextChangeDebounce:  time.Duration(config.Behavior.TextChangeDebounce) * time.Millisecond,
 		CursorPrediction: engine.CursorPredictionConfig{
 			Enabled:            config.Behavior.CursorPrediction.Enabled,
@@ -137,6 +184,9 @@ func NewDaemon(config Config) (*Daemon, error) {
 		DisabledIn:       config.Behavior.DisabledIn,
 		CompleteInInsert: config.Behavior.CompleteInInsert,
 		CompleteInNormal: config.Behavior.CompleteInNormal,
+
+		NextEditProvider:  nextEditProvider,
+		NextEditIdleDelay: idleCompletionDelay,
 	}, engine.SystemClock, datasetSender)
 	if err != nil {
 		return nil, err

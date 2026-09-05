@@ -46,6 +46,8 @@
 ---@field context_size integer Max input context size in tokens (used for input trimming; 0 = use max_tokens)
 ---@field max_tokens integer Max tokens to generate
 ---@field top_k integer
+---@field min_p number Min-p sampling threshold, llama.cpp only (0 = server default)
+---@field repeat_penalty number Repetition penalty, llama.cpp only (0 = server default)
 ---@field completion_timeout integer
 ---@field max_diff_history_tokens integer
 ---@field completion_path string API endpoint path (e.g., "/v1/completions")
@@ -64,6 +66,13 @@
 ---@field enabled boolean
 ---@field ghost_text boolean
 
+---@class CursortabNextEditConfig
+---@field enabled boolean
+---@field type string Edit-prediction provider: "zeta-2.1", "zeta-2", "zeta", or "sweep"
+---@field model string Model id (empty = use provider model)
+---@field url string Provider URL override (empty = use provider.url)
+---@field idle_delay integer Ms of no typing before the next-edit model is consulted
+
 ---@class CursortabConfig
 ---@field enabled boolean
 ---@field log_level string
@@ -73,6 +82,7 @@
 ---@field behavior CursortabBehaviorConfig
 ---@field contribute_data boolean Opt-in: send anonymous completion metrics to the public dataset for model training
 ---@field provider CursortabProviderConfig
+---@field next_edit CursortabNextEditConfig
 ---@field blink CursortabBlinkConfig
 ---@field debug CursortabDebugConfig
 
@@ -100,6 +110,14 @@ local default_config = {
 			text = " TAB ",
 			show_distance = true,
 		},
+	},
+
+	next_edit = {
+		enabled = false, -- Ask a second edit-prediction model while you pause with a completion displayed
+		type = "zeta-2.1", -- "zeta-2.1", "zeta-2", "zeta", or "sweep"
+		model = "", -- Model id (empty = provider.model)
+		url = "", -- Provider URL override (empty = provider.url)
+		idle_delay = 500, -- Ms of no typing before consulting the next-edit model
 	},
 
 	behavior = {
@@ -135,7 +153,7 @@ local default_config = {
 		ignore_filetypes = { "", "terminal" }, -- Filetypes to skip completions
 		ignore_gitignored = true, -- Skip files matched by .gitignore
 	},
-
+ 
 	provider = {
 		type = "inline", -- "inline", "fim", "sweep", "zeta-2.1", "zeta-2", "zeta", "copilot", "windsurf", or "mercuryapi"
 		url = "http://localhost:8000", -- URL of the provider server
@@ -145,6 +163,8 @@ local default_config = {
 		context_size = 0, -- Max input context size in tokens (0 = use max_tokens)
 		max_tokens = 512, -- Max tokens to generate
 		top_k = 50, -- Top-k sampling
+		min_p = 0.0, -- Min-p sampling threshold (0 = server default)
+		repeat_penalty = 0.0, -- Repetition penalty (0 = server default)
 		completion_timeout = 5000, -- Timeout in ms for completion requests
 		max_diff_history_tokens = 512, -- Max tokens for diff history (0 = no limit)
 		completion_path = "/v1/completions", -- API endpoint path
@@ -303,6 +323,7 @@ local fim_presets = {
 		prefix = "<fim_prefix>",
 		suffix = "<fim_suffix>",
 		middle = "<fim_middle>",
+		filename = "<filename>",
 		suffix_first = true,
 	},
 }
@@ -460,7 +481,7 @@ local function validate_config(cfg)
 					))
 				end
 			end
-			local optional_fields = { "repo_name", "file_sep" }
+			local optional_fields = { "repo_name", "file_sep", "filename" }
 			for _, field in ipairs(optional_fields) do
 				local value = cfg.provider.fim_tokens[field]
 				if value ~= nil and type(value) ~= "string" then
@@ -474,6 +495,21 @@ local function validate_config(cfg)
 				and type(cfg.provider.fim_tokens.suffix_first) ~= "boolean" then
 				error("[cursortab.nvim] provider.fim_tokens.suffix_first must be a boolean")
 			end
+		end
+	end
+	if cfg.next_edit ~= nil then
+		if cfg.next_edit.enabled == true then
+			local valid_types = { ["zeta-2.1"] = true, ["zeta-2"] = true, zeta = true, sweep = true }
+			if not valid_types[cfg.next_edit.type] then
+				error(string.format(
+					"[cursortab.nvim] next_edit.type must be one of: zeta-2.1, zeta-2, zeta, sweep (got %s)",
+					tostring(cfg.next_edit.type)
+				))
+			end
+		end
+		if cfg.next_edit.idle_delay ~= nil
+			and (type(cfg.next_edit.idle_delay) ~= "number" or cfg.next_edit.idle_delay < 0) then
+			error("[cursortab.nvim] next_edit.idle_delay must be a non-negative number")
 		end
 	end
 end

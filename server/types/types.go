@@ -199,6 +199,7 @@ type FIMTokenConfig struct {
 	Middle      string // Token before the middle/completion (e.g., "<|fim_middle|>")
 	RepoName    string // Optional repo-level FIM token (e.g., "<|repo_name|>")
 	FileSep     string // Optional file separator token (e.g., "<|file_sep|>")
+	Filename    string // Optional per-file context header (e.g., "<filename>"), Mellum style
 	SuffixFirst bool   // Emit suffix content before prefix content (Mellum, SeedCoder style)
 }
 
@@ -211,6 +212,8 @@ type ProviderConfig struct {
 	ProviderContextSize int             // Max input context size in tokens (0 = use ProviderMaxTokens)
 	ProviderMaxTokens   int             // Max tokens to generate
 	ProviderTopK        int             // Top-k sampling (used by some providers)
+	ProviderMinP        float64         // Min-p sampling threshold (llama.cpp, 0 = server default)
+	ProviderRepeatPen   float64         // Repetition penalty (llama.cpp, 0 = server default)
 	CompletionPath      string          // API endpoint path (e.g., "/v1/completions")
 	FIMTokens           *FIMTokenConfig // nil = prompt+suffix mode; non-nil = tokenized FIM
 	CompletionTimeout   int             // Timeout for completion requests in milliseconds
