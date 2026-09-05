@@ -81,6 +81,8 @@ func (o OpenAI) Request(prompt string, stop []string) *openai.CompletionRequest 
 		Temperature: o.config.ProviderTemperature,
 		MaxTokens:   o.config.ProviderMaxTokens,
 		TopK:        o.config.ProviderTopK,
+		MinP:        o.config.ProviderMinP,
+		RepeatPen:   o.config.ProviderRepeatPen,
 		Stop:        stop,
 		N:           1,
 		Echo:        false,

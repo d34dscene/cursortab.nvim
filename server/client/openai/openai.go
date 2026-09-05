@@ -21,6 +21,8 @@ type CompletionRequest struct {
 	Temperature float64  `json:"temperature"`
 	MaxTokens   int      `json:"max_tokens"`
 	TopK        int      `json:"top_k,omitempty"`
+	MinP        float64  `json:"min_p,omitempty"`
+	RepeatPen   float64  `json:"repeat_penalty,omitempty"`
 	Stop        []string `json:"stop,omitempty"`
 	N           int      `json:"n"`
 	Echo        bool     `json:"echo"`
