@@ -82,6 +82,7 @@ const (
 	defaultMaxUserActions     = 16
 	defaultFileChunkLines     = 30
 	defaultMaxRecentSnapshots = 3
+	defaultMaxRecentFileBytes = 4096
 	defaultMaxDiffBytes       = 4096
 	defaultMaxChangedSymbols  = 50
 	defaultMaxSiblings        = 50

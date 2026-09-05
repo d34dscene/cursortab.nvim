@@ -26,6 +26,7 @@ func (e *Engine) buildContextSourceInput(opts completionInputOptions, requiremen
 			MaxDiffBytes:       defaultMaxDiffBytes,
 			MaxChangedSymbols:  defaultMaxChangedSymbols,
 			MaxRecentSnapshots: defaultMaxRecentSnapshots,
+			MaxRecentFileBytes: defaultMaxRecentFileBytes,
 			MaxDiffTokens:      e.config.MaxDiffTokens,
 			MaxUserActions:     defaultMaxUserActions,
 		},

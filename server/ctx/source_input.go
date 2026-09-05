@@ -61,6 +61,7 @@ type CollectionLimits struct {
 	MaxDiffBytes       int
 	MaxChangedSymbols  int
 	MaxRecentSnapshots int
+	MaxRecentFileBytes int
 	MaxDiffTokens      int
 	MaxUserActions     int
 }

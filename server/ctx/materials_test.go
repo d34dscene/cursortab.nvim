@@ -2,6 +2,7 @@ package ctx
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -84,6 +85,77 @@ func TestUserActionsCollectFiltersCurrentFileAppliesLimitAndClones(t *testing.T)
 
 	actions[2].Offset = 99
 	assert.Equal(t, 2, result.Actions[0].Offset, "actions are cloned")
+}
+
+func TestRecentFilesCollectTruncatesOversizedSnapshots(t *testing.T) {
+	input := ContextSourceInput{
+		Snapshot: FileContextSnapshot{
+			RecentFiles: []RecentFileSnapshot{
+				{
+					Path: "minified.js",
+					FirstLines: []string{
+						strings.Repeat("x", 100_000),
+						"second line",
+					},
+				},
+				{
+					Path:       "normal.go",
+					FirstLines: []string{"package main", "func main() {}"},
+				},
+			},
+		},
+		Limits: CollectionLimits{MaxRecentFileBytes: 4096},
+	}
+
+	material, err := RecentFiles{}.collect(context.Background(), input)
+	assert.NoError(t, err, "recent files collect")
+	result := material.(RecentFiles)
+
+	assert.Len(t, 2, result.Files, "snapshot count")
+	total := 0
+	for _, line := range result.Files[0].Lines {
+		total += len(line) + 1
+	}
+	assert.True(t, total <= 4096, "oversized snapshot truncated to budget")
+	assert.Equal(t, []string{"package main", "func main() {}"}, result.Files[1].Lines, "small snapshot untouched")
+}
+
+func TestEditHistoryCollectTrimsRecentFileDiffs(t *testing.T) {
+	now := time.Now().UnixNano()
+	diff := func(original, updated string) *types.DiffEntry {
+		return &types.DiffEntry{
+			Original:    original,
+			Updated:     updated,
+			Source:      types.DiffSourceManual,
+			TimestampNs: now,
+			StartLine:   1,
+		}
+	}
+	big := &types.DiffEntry{
+		Original:    strings.Repeat("a", 10_000),
+		Updated:     strings.Repeat("b", 10_000),
+		Source:      types.DiffSourceManual,
+		TimestampNs: now,
+		StartLine:   1,
+	}
+	input := ContextSourceInput{
+		Current: CurrentSnapshot{File: FileSnapshot{Path: "current.go"}},
+		Snapshot: FileContextSnapshot{
+			RecentFiles: []RecentFileSnapshot{
+				{Path: "old.go", DiffHistories: []*types.DiffEntry{big, diff("small", "small changed")}},
+			},
+			NowNs: now,
+		},
+		Limits: CollectionLimits{MaxDiffTokens: 64},
+	}
+
+	material, err := EditHistory{}.collect(context.Background(), input)
+	assert.NoError(t, err, "edit history collect")
+	result := material.(EditHistory)
+
+	assert.Len(t, 1, result.Files, "edit history files")
+	assert.Len(t, 1, result.Files[0].DiffHistory, "oversized diff dropped, newest kept")
+	assert.Equal(t, "small", result.Files[0].DiffHistory[0].Original, "kept entry is the small one")
 }
 
 func TestEditHistoryCollectsCrossFileBeforeCurrent(t *testing.T) {

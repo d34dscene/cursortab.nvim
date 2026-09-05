@@ -76,11 +76,38 @@ func (RecentFiles) collect(_ context.Context, input ContextSourceInput) (materia
 		}
 		result.Files = append(result.Files, &types.RecentBufferSnapshot{
 			FilePath:    file.Path,
-			Lines:       slices.Clone(file.FirstLines),
+			Lines:       truncateLinesByBytes(file.FirstLines, input.Limits.MaxRecentFileBytes),
 			TimestampMs: file.LastAccessNs / 1e6,
 		})
 	}
 	return result, nil
+}
+
+// truncateLinesByBytes keeps the longest prefix of lines whose bytes
+// (line lengths plus newlines) fit within maxBytes. A single oversized line
+// is cut to maxBytes. maxBytes <= 0 disables truncation.
+func truncateLinesByBytes(lines []string, maxBytes int) []string {
+	if maxBytes <= 0 || len(lines) == 0 {
+		return slices.Clone(lines)
+	}
+	total := 0
+	end := 0
+	for end < len(lines) {
+		cost := len(lines[end]) + 1
+		if total+cost > maxBytes {
+			break
+		}
+		total += cost
+		end++
+	}
+	if end == 0 {
+		cut := maxBytes - 1 // leave room for the newline
+		if cut < 0 {
+			cut = 0
+		}
+		return []string{lines[0][:cut]}
+	}
+	return slices.Clone(lines[:end])
 }
 
 type EditHistory struct {
@@ -94,6 +121,9 @@ func (EditHistory) collect(_ context.Context, input ContextSourceInput) (materia
 		diffs := buffer.ProcessDiffHistory(file.DiffHistories, input.Snapshot.NowNs)
 		if len(diffs) == 0 {
 			continue
+		}
+		if input.Limits.MaxDiffTokens > 0 {
+			diffs = utils.TrimDiffEntries(diffs, input.Limits.MaxDiffTokens)
 		}
 		result.Files = append(result.Files, &types.FileDiffHistory{
 			FileName:    file.Path,
