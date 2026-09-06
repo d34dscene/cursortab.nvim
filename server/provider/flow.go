@@ -102,18 +102,15 @@ func prepareRequestState(input sourcectx.CompletionInput, config *types.Provider
 	if material, ok := sourcectx.Find[sourcectx.Treesitter](input.Materials); ok && material.Data != nil {
 		syntaxRanges = material.Data.SyntaxRanges
 	}
-	contextSize := 0
+	windowTokens := 0
 	if config != nil {
-		contextSize = config.ProviderContextSize
-		if contextSize == 0 {
-			contextSize = config.ProviderMaxTokens
-		}
+		windowTokens = WindowTokens(config, input.ContextChars)
 	}
 	trimmedLines, newCursorLine, _, trimOffset, didTrim := utils.TrimContentAroundCursor(
 		current.File.Lines,
 		cursorLine,
 		current.Cursor.Col,
-		contextSize,
+		windowTokens,
 		syntaxRanges,
 	)
 	state.Window.Lines = trimmedLines
