@@ -11,9 +11,15 @@ import (
 const cooperativeCollectTimeout = 200 * time.Millisecond
 
 // Collect executes the requested materials in order with one shared context.
-func Collect(parent context.Context, input ContextSourceInput, requirements Materials) (Materials, error) {
+// It also reports how many bytes the collected materials will add to the
+// prompt, as consumed from the limits' shared budget.
+func Collect(parent context.Context, input ContextSourceInput, requirements Materials) (Materials, int, error) {
 	if len(requirements) == 0 {
-		return nil, nil
+		return nil, 0, nil
+	}
+
+	if input.Limits.ContextChars >= 0 {
+		input.Budget = NewBudget(input.Limits.ContextChars)
 	}
 
 	ctx, cancel := context.WithTimeout(parent, cooperativeCollectTimeout)
@@ -23,9 +29,14 @@ func Collect(parent context.Context, input ContextSourceInput, requirements Mate
 	for i, requirement := range requirements {
 		material, err := requirement.collect(ctx, input)
 		if err != nil {
-			return nil, fmt.Errorf("context material %T: %w", requirement, err)
+			return nil, 0, fmt.Errorf("context material %T: %w", requirement, err)
 		}
 		collected[i] = material
 	}
-	return collected, nil
+
+	used := 0
+	if input.Budget != nil {
+		used = input.Budget.Used()
+	}
+	return collected, used, nil
 }

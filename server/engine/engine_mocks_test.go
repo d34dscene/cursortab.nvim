@@ -386,6 +386,10 @@ func (p *mockProvider) RequiredMaterials() ctx.Materials {
 	return p.materials
 }
 
+func (p *mockProvider) MaterialsBudgetChars() int {
+	return -1
+}
+
 func (p *mockProvider) Complete(_ context.Context, input ctx.CompletionInput) (*types.CompletionResponse, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()

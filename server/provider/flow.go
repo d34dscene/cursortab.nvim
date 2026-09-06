@@ -32,6 +32,8 @@ type Base struct {
 	kind                            engine.CompletionKind
 	canPrefetchFromSyntheticCurrent bool
 	materials                       sourcectx.Materials
+	// config is nil for API providers that do not size their own context.
+	config *types.ProviderConfig
 }
 
 // SyntheticPrefetch declares whether an edit provider can consume
@@ -44,12 +46,14 @@ const (
 )
 
 // NewBase declares a provider whose Build stage uses the supplied
-// CompletionInput snapshot as its editor state.
-func NewBase(kind engine.CompletionKind, materials sourcectx.Materials, syntheticPrefetch SyntheticPrefetch) Base {
+// CompletionInput snapshot as its editor state. config is the provider's own
+// config, or nil when it does not bound context itself.
+func NewBase(kind engine.CompletionKind, materials sourcectx.Materials, syntheticPrefetch SyntheticPrefetch, config *types.ProviderConfig) Base {
 	return Base{
 		kind:                            kind,
 		canPrefetchFromSyntheticCurrent: kind == engine.CompletionEdit && bool(syntheticPrefetch),
 		materials:                       materials,
+		config:                          config,
 	}
 }
 
@@ -63,6 +67,15 @@ func (b Base) CanPrefetchFromSyntheticCurrent() bool {
 
 func (b Base) RequiredMaterials() sourcectx.Materials {
 	return b.materials
+}
+
+// MaterialsBudgetChars reports the byte budget cross-file materials may add
+// to the prompt, or -1 when the provider does not bound them.
+func (b Base) MaterialsBudgetChars() int {
+	if b.config == nil {
+		return -1
+	}
+	return utils.EstimateCharsFromTokens(MaterialsTokens(b.config))
 }
 
 // CompletionFlow is the provider-local Build -> Call -> Parse pipeline.

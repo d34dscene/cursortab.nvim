@@ -30,15 +30,24 @@ var _ provider.OpenAIStreamFlow = (*Provider)(nil)
 
 func NewProvider(config *types.ProviderConfig) *Provider {
 	materials := sourcectx.Materials{sourcectx.Treesitter{}}
-	if config.FIMTokens != nil && (config.FIMTokens.FileSep != "" || config.FIMTokens.Filename != "") {
-		materials = append(materials,
-			sourcectx.Diagnostics{}, sourcectx.GitDiff{},
-			sourcectx.RecentFiles{}, sourcectx.EditHistory{},
-		)
+	if tokens := config.FIMTokens; tokens != nil {
+		switch {
+		case tokens.Filename != "":
+			// Mellum renders only recent file blocks before the FIM tokens.
+			materials = append(materials, sourcectx.RecentFiles{})
+		case tokens.RepoName != "" || tokens.FileSep != "":
+			// Qwen repo context also renders diffs and diagnostics. Budget
+			// priority: git diff (rare, usually empty), then recent files,
+			// then edit history, then diagnostics.
+			materials = append(materials,
+				sourcectx.GitDiff{}, sourcectx.RecentFiles{}, sourcectx.EditHistory{},
+				sourcectx.Diagnostics{},
+			)
+		}
 	}
 
 	return &Provider{
-		Base:   provider.NewBase(engine.CompletionFIM, materials, provider.SyntheticPrefetchDisabled),
+		Base:   provider.NewBase(engine.CompletionFIM, materials, provider.SyntheticPrefetchDisabled, config),
 		OpenAI: provider.NewOpenAI(providerName, config),
 	}
 }

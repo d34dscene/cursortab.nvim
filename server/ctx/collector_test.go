@@ -39,7 +39,7 @@ func TestCollectRunsMaterialsInOrder(t *testing.T) {
 		}
 	}
 
-	materials, err := Collect(context.Background(), ContextSourceInput{}, Materials{
+	materials, _, err := Collect(context.Background(), ContextSourceInput{}, Materials{
 		testMaterial{name: "first", collectFn: collectOne("first")},
 		testMaterial{name: "second", collectFn: collectOne("second")},
 	})
@@ -57,7 +57,7 @@ func TestCollectRunsMaterialsInOrder(t *testing.T) {
 
 func TestCollectWrapsMaterialError(t *testing.T) {
 	sourceErr := errors.New("source failed")
-	_, err := Collect(context.Background(), ContextSourceInput{}, Materials{
+	_, _, err := Collect(context.Background(), ContextSourceInput{}, Materials{
 		testMaterial{
 			name: "broken",
 			collectFn: func(context.Context, ContextSourceInput) (material, error) {
@@ -73,7 +73,7 @@ func TestCollectWrapsMaterialError(t *testing.T) {
 
 func TestCollectPassesSharedTimeoutToCooperativeMaterial(t *testing.T) {
 	start := time.Now()
-	_, err := Collect(context.Background(), ContextSourceInput{}, Materials{
+	_, _, err := Collect(context.Background(), ContextSourceInput{}, Materials{
 		testMaterial{
 			name: "slow",
 			collectFn: func(ctx context.Context, _ ContextSourceInput) (material, error) {

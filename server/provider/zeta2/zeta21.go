@@ -33,9 +33,9 @@ var _ provider.CompletionFlow[*openai.CompletionRequest, *openai.CompletionResul
 func NewProvider21(config *types.ProviderConfig) *Provider21 {
 	return &Provider21{
 		Base: provider.NewBase(engine.CompletionEdit, sourcectx.Materials{
-			sourcectx.Diagnostics{}, sourcectx.Treesitter{}, sourcectx.GitDiff{},
-			sourcectx.RecentFiles{}, sourcectx.EditHistory{},
-		}, provider.SyntheticPrefetchEnabled),
+			sourcectx.GitDiff{}, sourcectx.RecentFiles{}, sourcectx.EditHistory{},
+			sourcectx.Diagnostics{}, sourcectx.Treesitter{},
+		}, provider.SyntheticPrefetchEnabled, config),
 		OpenAI: provider.NewOpenAI(zeta21ProviderName, config),
 	}
 }

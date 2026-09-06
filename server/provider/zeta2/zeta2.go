@@ -56,9 +56,9 @@ var _ provider.OpenAIStreamFlow = (*Provider)(nil)
 func NewProvider(config *types.ProviderConfig) *Provider {
 	return &Provider{
 		Base: provider.NewBase(engine.CompletionEdit, sourcectx.Materials{
-			sourcectx.Diagnostics{}, sourcectx.Treesitter{}, sourcectx.GitDiff{},
-			sourcectx.RecentFiles{}, sourcectx.EditHistory{},
-		}, provider.SyntheticPrefetchEnabled),
+			sourcectx.GitDiff{}, sourcectx.RecentFiles{}, sourcectx.EditHistory{},
+			sourcectx.Diagnostics{}, sourcectx.Treesitter{},
+		}, provider.SyntheticPrefetchEnabled, config),
 		OpenAI: provider.NewOpenAI(providerName, config),
 	}
 }

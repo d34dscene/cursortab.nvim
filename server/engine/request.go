@@ -30,13 +30,11 @@ func completionInputCompatible(kind CompletionKind, current ctx.CurrentSnapshot)
 }
 
 func (e *Engine) collectCompletionInput(parent context.Context, sourceInput ctx.ContextSourceInput, requirements ctx.Materials) (ctx.CompletionInput, error) {
-	input := ctx.CompletionInput{Current: sourceInput.Current}
-	collected, err := ctx.Collect(parent, sourceInput, requirements)
+	collected, contextChars, err := ctx.Collect(parent, sourceInput, requirements)
 	if err != nil {
-		return input, err
+		return ctx.CompletionInput{Current: sourceInput.Current}, err
 	}
-	input.Materials = collected
-	return input, nil
+	return ctx.CompletionInput{Current: sourceInput.Current, Materials: collected, ContextChars: contextChars}, nil
 }
 
 func (e *Engine) prepareCompletionInput(parent context.Context, opts completionInputOptions) (ctx.CompletionInput, bool, error) {
@@ -45,7 +43,7 @@ func (e *Engine) prepareCompletionInput(parent context.Context, opts completionI
 
 func (e *Engine) prepareCompletionInputFor(p Provider, parent context.Context, opts completionInputOptions) (ctx.CompletionInput, bool, error) {
 	requirements := p.RequiredMaterials()
-	sourceInput := e.buildContextSourceInput(opts, requirements)
+	sourceInput := e.buildContextSourceInput(opts, requirements, p.MaterialsBudgetChars())
 	input := ctx.CompletionInput{Current: sourceInput.Current}
 	if !completionInputCompatible(p.CompletionKind(), sourceInput.Current) {
 		return input, false, nil

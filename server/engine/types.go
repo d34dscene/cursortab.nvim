@@ -57,6 +57,9 @@ type Provider interface {
 	CompletionKind() CompletionKind
 	CanPrefetchFromSyntheticCurrent() bool
 	RequiredMaterials() ctx.Materials
+	// MaterialsBudgetChars reports the byte budget cross-file materials may
+	// add to the prompt, or -1 when unbounded.
+	MaterialsBudgetChars() int
 	Complete(ctx context.Context, input ctx.CompletionInput) (*types.CompletionResponse, error)
 }
 

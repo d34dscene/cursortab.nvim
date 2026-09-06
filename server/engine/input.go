@@ -14,7 +14,7 @@ type completionInputOptions struct {
 	hasCursorOverride bool
 }
 
-func (e *Engine) buildContextSourceInput(opts completionInputOptions, requirements ctx.Materials) ctx.ContextSourceInput {
+func (e *Engine) buildContextSourceInput(opts completionInputOptions, requirements ctx.Materials, materialsBudgetChars int) ctx.ContextSourceInput {
 	current := e.buildCurrentSnapshot(opts)
 	snapshot := e.buildFileContextSnapshot(requirements)
 	return ctx.ContextSourceInput{
@@ -29,6 +29,7 @@ func (e *Engine) buildContextSourceInput(opts completionInputOptions, requiremen
 			MaxRecentFileBytes: defaultMaxRecentFileBytes,
 			MaxDiffTokens:      e.config.MaxDiffTokens,
 			MaxUserActions:     defaultMaxUserActions,
+			ContextChars:       materialsBudgetChars,
 		},
 	}
 }

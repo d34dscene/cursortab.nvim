@@ -21,10 +21,13 @@ type material interface {
 }
 
 // CompletionInput is the provider-visible request shape: current editor state
-// plus the materials the provider asked the collector to gather.
+// plus the materials the provider asked the collector to gather. ContextChars
+// is the byte size the collected materials add to the prompt, which providers
+// subtract from the window budget.
 type CompletionInput struct {
-	Current   CurrentSnapshot
-	Materials Materials
+	Current      CurrentSnapshot
+	Materials    Materials
+	ContextChars int
 }
 
 type CurrentSnapshot struct {

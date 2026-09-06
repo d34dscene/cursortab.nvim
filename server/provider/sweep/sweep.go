@@ -35,9 +35,9 @@ var _ provider.OpenAIStreamFlow = (*Provider)(nil)
 func NewProvider(config *types.ProviderConfig) *Provider {
 	return &Provider{
 		Base: provider.NewBase(engine.CompletionEdit, sourcectx.Materials{
-			sourcectx.Diagnostics{}, sourcectx.Treesitter{}, sourcectx.GitDiff{},
-			sourcectx.RecentFiles{}, sourcectx.EditHistory{}, sourcectx.UserActions{},
-		}, provider.SyntheticPrefetchEnabled),
+			sourcectx.GitDiff{}, sourcectx.RecentFiles{}, sourcectx.EditHistory{},
+			sourcectx.Diagnostics{}, sourcectx.Treesitter{}, sourcectx.UserActions{},
+		}, provider.SyntheticPrefetchEnabled, config),
 		OpenAI: provider.NewOpenAI(providerName, config),
 	}
 }
@@ -47,7 +47,7 @@ func (p *Provider) Complete(ctx context.Context, input sourcectx.CompletionInput
 }
 
 func (p *Provider) StreamCompletion(ctx context.Context, input sourcectx.CompletionInput) (engine.CompletionStream, error) {
-	return p.OpenAI.StartStream(ctx, input, p.ProviderConfig(), p)
+	return p.StartStream(ctx, input, p.ProviderConfig(), p)
 }
 
 func (p *Provider) Build(ctx *provider.RequestState) (*openai.CompletionRequest, error) {
@@ -127,7 +127,7 @@ func (p *Provider) Build(ctx *provider.RequestState) (*openai.CompletionRequest,
 	promptBuilder.WriteString("<|file_sep|>original/")
 	promptBuilder.WriteString(current.File.Path)
 	promptBuilder.WriteString(":")
-	promptBuilder.WriteString(fmt.Sprintf("%d:%d", startLine, endLine))
+	fmt.Fprintf(&promptBuilder, "%d:%d", startLine, endLine)
 	promptBuilder.WriteString("\n")
 	promptBuilder.WriteString(codeBlock)
 	promptBuilder.WriteString("\n")
@@ -137,7 +137,7 @@ func (p *Provider) Build(ctx *provider.RequestState) (*openai.CompletionRequest,
 	promptBuilder.WriteString("<|file_sep|>current/")
 	promptBuilder.WriteString(current.File.Path)
 	promptBuilder.WriteString(":")
-	promptBuilder.WriteString(fmt.Sprintf("%d:%d", startLine, endLine))
+	fmt.Fprintf(&promptBuilder, "%d:%d", startLine, endLine)
 	promptBuilder.WriteString("\n")
 	promptBuilder.WriteString(codeBlockWithCursor)
 	promptBuilder.WriteString("\n")
@@ -146,7 +146,7 @@ func (p *Provider) Build(ctx *provider.RequestState) (*openai.CompletionRequest,
 	promptBuilder.WriteString("<|file_sep|>updated/")
 	promptBuilder.WriteString(current.File.Path)
 	promptBuilder.WriteString(":")
-	promptBuilder.WriteString(fmt.Sprintf("%d:%d", startLine, endLine))
+	fmt.Fprintf(&promptBuilder, "%d:%d", startLine, endLine)
 	promptBuilder.WriteString("\n")
 
 	prefill := computePrefillForContext(ctx, codeBlock, relativeCursor)

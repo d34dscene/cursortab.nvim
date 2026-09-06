@@ -27,12 +27,14 @@ func (materials Materials) FileContextNeeds() fileContextNeeds {
 }
 
 // ContextSourceInput is collector-only input. It may hold live readers and
-// engine limits, but providers only see collected material values.
+// engine limits, but providers only see collected material values. Budget is
+// nil when the provider does not bound cross-file context.
 type ContextSourceInput struct {
 	Current  CurrentSnapshot
 	Snapshot FileContextSnapshot
 	Buffer   bufferContextReader
 	Limits   CollectionLimits
+	Budget   *Budget
 }
 
 type bufferContextReader interface {
@@ -64,4 +66,7 @@ type CollectionLimits struct {
 	MaxRecentFileBytes int
 	MaxDiffTokens      int
 	MaxUserActions     int
+	// ContextChars bounds the total bytes cross-file materials may add to
+	// the prompt. Negative disables budgeting.
+	ContextChars int
 }
