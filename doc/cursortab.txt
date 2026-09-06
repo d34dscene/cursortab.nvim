@@ -107,7 +107,7 @@ Full configuration with defaults: >lua
       api_key_env = "",             -- Env var name for API key
       model = "",
       temperature = 0.0,
-      context_size = 0,               -- 0 = use max_tokens (inline/fim default: 1024)
+      context_size = 0,               -- model context window; total prompt stays under it (0 = conservative default)
       max_tokens = 512,               -- inline default: 64, fim default: 128
       top_k = 50,
       completion_timeout = 5000,    -- ms
@@ -309,8 +309,16 @@ PROVIDER OPTIONS                                    *cursortab-config-provider*
       Sampling temperature for generation.
 
   `max_tokens`
-      Maximum tokens to generate. For sweep/zeta/zeta-2/zeta-2.1 providers,
-      this also determines the input context size when `context_size` is 0.
+      Maximum tokens to generate. Reserved from `context_size` for the
+      generated completion on top of the prompt.
+
+  `context_size`                                 *cursortab-config-provider-context*
+      Model context window in tokens. The total prompt (cross-file context
+      plus the current file window) stays strictly under it, with `max_tokens`
+      reserved for generation. Must be greater than `max_tokens` when set.
+      When 0, a conservative default (1024 input tokens) is used. Cross-file
+      context (recent files, diff history, diagnostics) can use at most half
+      of the remaining input budget; the current file always gets the rest.
 
   `top_k`
       Top-k sampling parameter.
@@ -319,7 +327,8 @@ PROVIDER OPTIONS                                    *cursortab-config-provider*
       Timeout in milliseconds for completion requests.
 
   `max_diff_history_tokens`
-      Maximum tokens for diff history context. Set to 0 for no limit.
+      Maximum tokens for diff history context, shared across all files.
+      Set to 0 for no limit.
 
   `completion_path`
       API endpoint path for completions. Default: "/v1/completions".

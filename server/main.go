@@ -70,12 +70,12 @@ var Version = "0.8.0" // AUTO-UPDATED by release workflow
 
 // Config is the main configuration structure
 type Config struct {
-	NsID           int            `json:"ns_id"`
-	LogLevel       string         `json:"log_level"`
-	StateDir       string         `json:"state_dir"`
-	EditorVersion  string         `json:"editor_version"`
-	EditorOS       string         `json:"editor_os"`
-	ContributeData bool           `json:"contribute_data"`
+	NsID           int             `json:"ns_id"`
+	LogLevel       string          `json:"log_level"`
+	StateDir       string          `json:"state_dir"`
+	EditorVersion  string          `json:"editor_version"`
+	EditorOS       string          `json:"editor_os"`
+	ContributeData bool            `json:"contribute_data"`
 	Behavior       BehaviorConfig  `json:"behavior"`
 	Provider       ProviderConfig  `json:"provider"`
 	NextEdit       *NextEditConfig `json:"next_edit,omitempty"`
@@ -119,6 +119,11 @@ func (c *Config) Validate() error {
 	}
 	if c.Provider.ContextSize < 0 {
 		return fmt.Errorf("invalid provider.context_size %d: must be >= 0", c.Provider.ContextSize)
+	}
+	if c.Provider.ContextSize > 0 && c.Provider.ContextSize <= c.Provider.MaxTokens {
+		return fmt.Errorf(
+			"invalid provider.context_size %d: must be greater than provider.max_tokens %d (max_tokens is reserved for generation on top of the prompt budget)",
+			c.Provider.ContextSize, c.Provider.MaxTokens)
 	}
 	if c.Provider.MaxTokens < 0 {
 		return fmt.Errorf("invalid provider.max_tokens %d: must be >= 0", c.Provider.MaxTokens)
@@ -253,7 +258,7 @@ func main() {
 		return
 	}
 
-	var mode ServerMode = ModeClient
+	var mode = ModeClient
 
 	// Check command line arguments
 	if len(os.Args) > 1 && os.Args[1] == "--daemon" {

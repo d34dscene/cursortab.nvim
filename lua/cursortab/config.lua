@@ -43,7 +43,7 @@
 ---@field api_key_env string|nil Environment variable name containing the API key (e.g., "OPENAI_API_KEY")
 ---@field model string
 ---@field temperature number
----@field context_size integer Max input context size in tokens (used for input trimming; 0 = use max_tokens)
+---@field context_size integer Model context window in tokens. The total prompt (cross-file context plus current file) stays under it, with max_tokens reserved for generation. 0 = conservative default (1024 input tokens)
 ---@field max_tokens integer Max tokens to generate
 ---@field top_k integer
 ---@field min_p number Min-p sampling threshold, llama.cpp only (0 = server default)
@@ -160,13 +160,13 @@ local default_config = {
 		api_key_env = "", -- Environment variable name for API key (e.g., "OPENAI_API_KEY")
 		model = "", -- Model name
 		temperature = 0.0, -- Sampling temperature
-		context_size = 0, -- Max input context size in tokens (0 = use max_tokens)
-		max_tokens = 512, -- Max tokens to generate
+		context_size = 0, -- Model context window in tokens; total prompt stays under it (0 = conservative default)
+		max_tokens = 512, -- Max tokens to generate, reserved from context_size
 		top_k = 50, -- Top-k sampling
 		min_p = 0.0, -- Min-p sampling threshold (0 = server default)
 		repeat_penalty = 0.0, -- Repetition penalty (0 = server default)
 		completion_timeout = 5000, -- Timeout in ms for completion requests
-		max_diff_history_tokens = 512, -- Max tokens for diff history (0 = no limit)
+		max_diff_history_tokens = 512, -- Max tokens for diff history across all files (0 = no limit)
 		completion_path = "/v1/completions", -- API endpoint path
 		-- fim_tokens is optional. Omit (the default) to use OpenAI prompt+suffix
 		-- format (e.g. DeepSeek). Set it to opt into tokenized FIM, either as a
@@ -454,6 +454,17 @@ local function validate_config(cfg)
 	if cfg.provider then
 		if cfg.provider.context_size and cfg.provider.context_size < 0 then
 			error("[cursortab.nvim] provider.context_size must be >= 0")
+		end
+		if cfg.provider.context_size
+			and cfg.provider.context_size > 0
+			and cfg.provider.max_tokens
+			and cfg.provider.context_size <= cfg.provider.max_tokens then
+			error(
+				string.format(
+					"[cursortab.nvim] provider.context_size must be greater than provider.max_tokens (%d); max_tokens is reserved for generation on top of the prompt budget",
+					cfg.provider.max_tokens
+				)
+			)
 		end
 		if cfg.provider.max_tokens and cfg.provider.max_tokens < 0 then
 			error("[cursortab.nvim] provider.max_tokens must be >= 0")

@@ -208,7 +208,7 @@ require("cursortab").setup({
     api_key_env = "",                     -- Env var name for API key (e.g., "OPENAI_API_KEY")
     model = "",                           -- Model name
     temperature = 0.0,                    -- Sampling temperature
-    context_size = 0,                     -- Max input context in tokens (0 = use max_tokens; inline/fim default: 1024)
+    context_size = 0,                     -- Model context window in tokens; total prompt stays under it (0 = conservative default)
     max_tokens = 512,                     -- Max tokens to generate (inline default: 64, fim default: 128)
     top_k = 50,                           -- Top-k sampling
     min_p = 0.0,                          -- Min-p threshold, llama.cpp only (0 = server default)
@@ -708,6 +708,10 @@ The `copilot` provider is known to be slower than the rest.
    your model is slow
 3. Increase `provider.context_size` to give the model more surrounding context
    (trade-off: slower completions)
+4. If the daemon log (`:CursortabLog`) shows "exceeds the available context
+   size", the prompt plus `max_tokens` no longer fit your server's context.
+   Lower `provider.context_size` to your llama-server's `-c` value, or raise
+   `-c` when starting llama-server.
 
 </details>
 
