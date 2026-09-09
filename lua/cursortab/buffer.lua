@@ -74,6 +74,19 @@ local function is_ignored_filetype(filetype, ignored_filetypes)
 	return false
 end
 
+-- Global buffer state cache to avoid expensive API calls on every cursor movement
+---@type BufferState
+local buffer_state = {
+	is_floating_window = false,
+	is_modifiable = false,
+	is_readonly = false,
+	filetype = "",
+	buffer_path = "",
+	should_skip = true, -- Combined check result
+	current_buf = nil,
+	current_win = nil,
+}
+
 -- Cache for gitignore check results (path -> boolean)
 ---@type table<string, boolean>
 local gitignore_cache = {}
@@ -109,19 +122,6 @@ local function is_gitignored(path)
 	end)
 	return false
 end
-
--- Global buffer state cache to avoid expensive API calls on every cursor movement
----@type BufferState
-local buffer_state = {
-	is_floating_window = false,
-	is_modifiable = false,
-	is_readonly = false,
-	filetype = "",
-	buffer_path = "",
-	should_skip = true, -- Combined check result
-	current_buf = nil,
-	current_win = nil,
-}
 
 -- Function to update buffer state (called when buffer/window changes)
 local function update_buffer_state()
