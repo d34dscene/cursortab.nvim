@@ -50,6 +50,12 @@ type Provider struct {
 var _ engine.Provider = (*Provider)(nil)
 var _ provider.CompletionFlow[*mercuryapi.Request, *mercuryapi.Response] = (*Provider)(nil)
 
+func init() {
+	provider.Register(string(types.ProviderTypeMercuryAPI), func(config *types.ProviderConfig) engine.Provider {
+		return NewProvider(config)
+	})
+}
+
 func NewProvider(config *types.ProviderConfig) *Provider {
 	return &Provider{
 		Base: provider.NewBase(engine.CompletionEdit, sourcectx.Materials{

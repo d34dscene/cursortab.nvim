@@ -77,6 +77,9 @@ func runCmd(args []string) error {
 		isSuppress := len(sc.Expected) == 0
 		outcome := outcomes[i]
 		for _, to := range outcome.Targets {
+			if to.Skipped {
+				continue
+			}
 			targetTypes[to.Target.Name] = to.Target.Type
 			if to.Error != nil {
 				fmt.Fprintf(os.Stderr, "[error] %s / %s: %v\n", sc.ID, to.Target.Name, to.Error)

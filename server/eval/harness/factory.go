@@ -7,13 +7,10 @@ import (
 
 	"cursortab/engine"
 	"cursortab/eval/cassette"
+	"cursortab/provider"
+	_ "cursortab/provider/all"
 	"cursortab/provider/copilot"
-	"cursortab/provider/fim"
-	"cursortab/provider/mercuryapi"
-	"cursortab/provider/sweep"
 	"cursortab/provider/windsurf"
-	"cursortab/provider/zeta"
-	"cursortab/provider/zeta2"
 	"cursortab/types"
 )
 
@@ -30,73 +27,14 @@ func BuildProviderForTarget(t Target, baseCfg *types.ProviderConfig, transport h
 	}
 	cfg := mergeConfig(baseCfg, t)
 
+	// Providers that need more than config are built here. Everything else
+	// goes through the shared registry so there is one place a provider is
+	// constructed, not one per consumer.
 	switch t.Type {
-	case "sweep":
-		p := sweep.NewProvider(cfg)
-		p.SetHTTPTransport(transport)
-		return p, nil
 	case "mercuryapi":
 		if t.URL != "" {
 			return nil, fmt.Errorf("harness: target %q has URL override but mercuryapi only supports the hosted endpoint", t.Name)
 		}
-		p := mercuryapi.NewProvider(cfg)
-		p.SetHTTPTransport(transport)
-		return p, nil
-	case "zeta":
-		p := zeta.NewProvider(cfg)
-		p.SetHTTPTransport(transport)
-		return p, nil
-	case "zeta-2":
-		p := zeta2.NewProvider(cfg)
-		p.SetHTTPTransport(transport)
-		return p, nil
-	case "zeta-2.1":
-		p := zeta2.NewProvider21(cfg)
-		p.SetHTTPTransport(transport)
-		return p, nil
-	case "fim":
-		if cfg.ProviderContextSize == 0 {
-			cfg.ProviderContextSize = 1024
-		}
-		if cfg.ProviderMaxTokens == 0 || cfg.ProviderMaxTokens > 128 {
-			cfg.ProviderMaxTokens = 128
-		}
-		// Qwen models (and Zeta, which is Qwen-based) use the standard FIM
-		// tokens; inject them when targets haven't configured FIMTokens. Without
-		// this, eval FIM falls back to prompt+suffix mode and Qwen completions
-		// regress.
-		isQwen := strings.Contains(strings.ToLower(cfg.ProviderModel), "qwen")
-		if cfg.FIMTokens == nil && isQwen {
-			cfg.FIMTokens = &types.FIMTokenConfig{
-				Prefix: "<|fim_prefix|>",
-				Suffix: "<|fim_suffix|>",
-				Middle: "<|fim_middle|>",
-			}
-		}
-		// Qwen also supports repo-level cross-file context.
-		if cfg.FIMTokens != nil && isQwen {
-			if cfg.FIMTokens.RepoName == "" {
-				cfg.FIMTokens.RepoName = "<|repo_name|>"
-			}
-			if cfg.FIMTokens.FileSep == "" {
-				cfg.FIMTokens.FileSep = "<|file_sep|>"
-			}
-		}
-		// Mellum uses suffix-first token order and filename-tagged cross-file
-		// context (JetBrains card format).
-		isMellum := strings.Contains(strings.ToLower(cfg.ProviderModel), "mellum")
-		if cfg.FIMTokens == nil && isMellum {
-			cfg.FIMTokens = &types.FIMTokenConfig{
-				Prefix:      "<fim_prefix>",
-				Suffix:      "<fim_suffix>",
-				Middle:      "<fim_middle>",
-				Filename:    "<filename>",
-				SuffixFirst: true,
-			}
-		}
-		p := fim.NewProvider(cfg)
-		p.SetHTTPTransport(transport)
-		return p, nil
 	case "copilot":
 		if cs == nil {
 			return nil, fmt.Errorf("harness: target %q (copilot) requires a cassette; copilot cannot be recorded from the standalone harness", t.Name)
@@ -106,12 +44,62 @@ func BuildProviderForTarget(t Target, baseCfg *types.ProviderConfig, transport h
 		}
 		return copilot.NewProvider(copilotLSP), nil
 	case "windsurf":
-		wsInfo := newCassetteWindsurfInfo()
-		p := windsurf.NewProvider(wsInfo)
+		p := windsurf.NewProvider(newCassetteWindsurfInfo())
 		p.SetHTTPTransport(transport)
 		return p, nil
-	default:
-		return nil, fmt.Errorf("harness: unknown provider type %q (target %q)", t.Type, t.Name)
+	case "fim":
+		applyFIMDefaults(cfg)
+	}
+
+	prov, err := provider.Build(t.Type, cfg)
+	if err != nil {
+		return nil, fmt.Errorf("harness: target %q: %w", t.Name, err)
+	}
+	provider.SetTransport(prov, transport)
+	return prov, nil
+}
+
+// applyFIMDefaults fills in the token layout and generation budget the eval
+// runs rely on, keyed off the model name.
+func applyFIMDefaults(cfg *types.ProviderConfig) {
+	if cfg.ProviderContextSize == 0 {
+		cfg.ProviderContextSize = 1024
+	}
+	if cfg.ProviderMaxTokens == 0 || cfg.ProviderMaxTokens > 128 {
+		cfg.ProviderMaxTokens = 128
+	}
+	// Qwen models (and Zeta, which is Qwen-based) use the standard FIM
+	// tokens; inject them when targets haven't configured FIMTokens. Without
+	// this, eval FIM falls back to prompt+suffix mode and Qwen completions
+	// regress.
+	isQwen := strings.Contains(strings.ToLower(cfg.ProviderModel), "qwen")
+	if cfg.FIMTokens == nil && isQwen {
+		cfg.FIMTokens = &types.FIMTokenConfig{
+			Prefix: "<|fim_prefix|>",
+			Suffix: "<|fim_suffix|>",
+			Middle: "<|fim_middle|>",
+		}
+	}
+	// Qwen also supports repo-level cross-file context.
+	if cfg.FIMTokens != nil && isQwen {
+		if cfg.FIMTokens.RepoName == "" {
+			cfg.FIMTokens.RepoName = "<|repo_name|>"
+		}
+		if cfg.FIMTokens.FileSep == "" {
+			cfg.FIMTokens.FileSep = "<|file_sep|>"
+		}
+	}
+	// Mellum uses suffix-first token order and filename-tagged cross-file
+	// context (JetBrains card format).
+	isMellum := strings.Contains(strings.ToLower(cfg.ProviderModel), "mellum")
+	if cfg.FIMTokens == nil && isMellum {
+		cfg.FIMTokens = &types.FIMTokenConfig{
+			Prefix:      "<fim_prefix>",
+			Suffix:      "<fim_suffix>",
+			Middle:      "<fim_middle>",
+			Filename:    "<filename>",
+			SuffixFirst: true,
+		}
 	}
 }
 

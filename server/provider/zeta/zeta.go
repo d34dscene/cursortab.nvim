@@ -26,6 +26,12 @@ var _ engine.Provider = (*Provider)(nil)
 var _ engine.StreamingProvider = (*Provider)(nil)
 var _ provider.OpenAIStreamFlow = (*Provider)(nil)
 
+func init() {
+	provider.Register(string(types.ProviderTypeZeta), func(config *types.ProviderConfig) engine.Provider {
+		return NewProvider(config)
+	})
+}
+
 func NewProvider(config *types.ProviderConfig) *Provider {
 	return &Provider{
 		Base: provider.NewBase(engine.CompletionEdit, sourcectx.Materials{

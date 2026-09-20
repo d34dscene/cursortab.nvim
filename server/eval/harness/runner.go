@@ -66,6 +66,10 @@ type TargetOutcome struct {
 	TotalLatencyMs int64
 	RequestCount   int
 	Error          error
+	// Skipped is true when the target had no cassette for this scenario and
+	// replay mode dropped it before any engine work. Consumers must ignore
+	// it: there is no score to record.
+	Skipped bool
 }
 
 // ScenarioOutcome bundles per-target results for a single scenario.
@@ -130,11 +134,13 @@ func runTarget(sc *Scenario, t Target, cfg Config) *TargetOutcome {
 	case ModeReplay:
 		cs, ok := sc.Cassettes[t.Name]
 		if !ok {
-			// No cassette — use an empty one. This is fine for gating-only
-			// scenarios that suppress before the provider is called. If the
-			// engine does try to call the provider, the replayer will return
-			// a "cassette exhausted" error on the first request.
-			cs = cassette.New(t.Type, "")
+			// No cassette for this target at all: it was never recorded for
+			// this scenario. Skip instead of erroring, so adding a target to
+			// DefaultTargets does not spam every scenario with "cassette
+			// exhausted" noise until its cassettes land. A recorded cassette
+			// with zero interactions still runs, which is what gating-only
+			// (suppress) scenarios rely on.
+			return &TargetOutcome{Target: t, Skipped: true}
 		}
 		if cfg.StrictModelVersion && t.Model != "" && cs.Meta.ModelVersion != "" && cs.Meta.ModelVersion != t.Model {
 			to.Error = fmt.Errorf("cassette model_version %q != target model %q", cs.Meta.ModelVersion, t.Model)
