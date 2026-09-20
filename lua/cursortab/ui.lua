@@ -1068,8 +1068,16 @@ end
 ---@param current_content string Current line content
 ---@return boolean
 function ui.typing_matches_completion(line_num, current_content)
-	if not expected_line or not expected_line_num or not original_len then
+	if not has_completion then
 		return false
+	end
+	-- No tracked expected line means the ghost is a multi-line addition or a
+	-- modification, which cannot be matched cheaply here. Keep it visible and
+	-- let the daemon decide: a still-valid completion is re-rendered and a
+	-- diverged one is rejected within a local round trip. Clearing here would
+	-- make the ghost vanish on every keystroke.
+	if not expected_line or not expected_line_num or not original_len then
+		return true
 	end
 	if line_num ~= expected_line_num then
 		return false
