@@ -89,6 +89,7 @@ local function start_daemon()
 		editor_version = string.format("%d.%d.%d", v.major, v.minor, v.patch),
 		editor_os = vim.uv.os_uname().sysname, ---@diagnostic disable-line: undefined-field
 		contribute_data = cfg.contribute_data,
+		trace_enabled = cfg.trace_enabled,
 		behavior = {
 			idle_completion_delay = cfg.behavior.idle_completion_delay,
 			text_change_debounce = cfg.behavior.text_change_debounce,
@@ -102,23 +103,9 @@ local function start_daemon()
 				proximity_threshold = cfg.behavior.cursor_prediction.proximity_threshold,
 			},
 		},
-		provider = {
-			type = cfg.provider.type,
-			url = cfg.provider.url,
-			api_key_env = cfg.provider.api_key_env,
-			model = cfg.provider.model,
-			temperature = cfg.provider.temperature,
-			context_size = cfg.provider.context_size,
-			max_tokens = cfg.provider.max_tokens,
-			top_k = cfg.provider.top_k,
-			min_p = cfg.provider.min_p,
-			repeat_penalty = cfg.provider.repeat_penalty,
-			completion_timeout = cfg.provider.completion_timeout,
-			max_diff_history_tokens = cfg.provider.max_diff_history_tokens,
-			completion_path = cfg.provider.completion_path,
-			fim_tokens = cfg.provider.fim_tokens,
-			privacy_mode = cfg.provider.privacy_mode,
-		},
+		-- The provider table is forwarded as-is. It mirrors the Go ProviderConfig
+		-- one for one, and enumerating keys here silently dropped new options.
+		provider = cfg.provider,
 		next_edit = {
 			enabled = cfg.next_edit.enabled,
 			type = cfg.next_edit.type,

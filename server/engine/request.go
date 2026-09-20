@@ -126,6 +126,7 @@ func (e *Engine) requestCompletion(source types.CompletionSource, manual bool) {
 
 	if reason := e.suppressCompletionRequest(source, manual); reason != "" {
 		logCompletionSuppression(reason)
+		e.traceSuppressed(source, reason)
 		return
 	}
 
@@ -152,6 +153,7 @@ func (e *Engine) requestCompletion(source types.CompletionSource, manual bool) {
 	}
 
 	e.state = statePendingCompletion
+	e.traceRequest(source, requestID)
 	reqCtx, cancel := context.WithTimeout(e.mainCtx, e.config.CompletionTimeout)
 	e.currentCancel = cancel
 	go func() {

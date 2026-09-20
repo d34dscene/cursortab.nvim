@@ -19,6 +19,7 @@ func (e *Engine) reject() {
 	e.buffer.ClearUI()
 	if e.display.hasCompletion() {
 		e.sendMetric(metrics.EventRejected)
+		e.traceRejected()
 	}
 	e.cursorTarget = nil
 	e.stagedCompletion = nil
@@ -54,6 +55,7 @@ func (e *Engine) acceptCompletion() {
 	e.saveCurrentFileState()
 
 	e.sendMetric(metrics.EventAccepted)
+	e.traceAccepted()
 
 	// Accept = forward progress; any cached rejections for this file are stale.
 	e.forgetRejectedCompletions(e.buffer.Path())

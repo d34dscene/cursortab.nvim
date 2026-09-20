@@ -6,23 +6,23 @@ import (
 	"io"
 	"net"
 	"os"
+	"path/filepath"
 	"strconv"
 	"sync/atomic"
 	"time"
 
 	"cursortab/buffer"
+	"cursortab/ctx"
 	"cursortab/engine"
+	"cursortab/index"
 	"cursortab/logger"
 	"cursortab/metrics"
+	"cursortab/provider"
+	_ "cursortab/provider/all"
 	"cursortab/provider/copilot"
 	"cursortab/provider/dataset"
-	"cursortab/provider/fim"
-	"cursortab/provider/inline"
-	"cursortab/provider/mercuryapi"
-	"cursortab/provider/sweep"
 	"cursortab/provider/windsurf"
-	"cursortab/provider/zeta"
-	"cursortab/provider/zeta2"
+	"cursortab/session"
 	"cursortab/types"
 
 	"github.com/neovim/go-client/nvim"
@@ -33,6 +33,7 @@ type Daemon struct {
 	provider    engine.Provider
 	buffer      *buffer.NvimBuffer
 	engine      *engine.Engine
+	tracer      *session.Recorder
 	listener    net.Listener
 	pidPath     string
 	clientCount int64
@@ -52,17 +53,9 @@ func buildNextEditProvider(cfg *NextEditConfig, base *types.ProviderConfig) (eng
 	if cfg.URL != "" {
 		neCfg.ProviderURL = cfg.URL
 	}
-	var prov engine.Provider
-	switch types.ProviderType(cfg.Type) {
-	case types.ProviderTypeSweep:
-		prov = sweep.NewProvider(&neCfg)
-	case types.ProviderTypeZeta:
-		prov = zeta.NewProvider(&neCfg)
-	case types.ProviderTypeZeta2:
-		prov = zeta2.NewProvider(&neCfg)
-	case types.ProviderTypeZeta21:
-		prov = zeta2.NewProvider21(&neCfg)
-	default:
+
+	prov, err := provider.Build(cfg.Type, &neCfg)
+	if err != nil {
 		return nil, fmt.Errorf(
 			"unsupported next_edit.type %q: must be an edit-prediction provider (zeta-2.1, zeta-2, zeta, sweep)", cfg.Type)
 	}
@@ -97,6 +90,10 @@ func NewDaemon(config Config) (*Daemon, error) {
 		ProviderRepeatPen:   config.Provider.RepeatPenalty,
 		CompletionPath:      config.Provider.CompletionPath,
 		CompletionTimeout:   config.Provider.CompletionTimeout,
+		RetrievalEnabled:    config.Provider.RetrievalEnabled,
+		RetrievalMaxChunks:  config.Provider.RetrievalMaxChunks,
+		Logprobs:            config.Provider.Logprobs,
+		MinConfidence:       config.Provider.MinConfidence,
 		PrivacyMode:         config.Provider.PrivacyMode,
 		Version:             Version,
 		EditorVersion:       config.EditorVersion,
@@ -123,26 +120,16 @@ func NewDaemon(config Config) (*Daemon, error) {
 
 	var prov engine.Provider
 	switch types.ProviderType(config.Provider.Type) {
-	case types.ProviderTypeInline:
-		prov = inline.NewProvider(providerConfig)
-	case types.ProviderTypeFIM:
-		prov = fim.NewProvider(providerConfig)
-	case types.ProviderTypeSweep:
-		prov = sweep.NewProvider(providerConfig)
-	case types.ProviderTypeZeta:
-		prov = zeta.NewProvider(providerConfig)
-	case types.ProviderTypeZeta2:
-		prov = zeta2.NewProvider(providerConfig)
-	case types.ProviderTypeZeta21:
-		prov = zeta2.NewProvider21(providerConfig)
 	case types.ProviderTypeCopilot:
 		prov = copilot.NewProvider(buf)
 	case types.ProviderTypeWindsurf:
 		prov = windsurf.NewProvider(buf)
-	case types.ProviderTypeMercuryAPI:
-		prov = mercuryapi.NewProvider(providerConfig)
 	default:
-		return nil, fmt.Errorf("unsupported provider type: %s", config.Provider.Type)
+		registered, err := provider.Build(config.Provider.Type, providerConfig)
+		if err != nil {
+			return nil, err
+		}
+		prov = registered
 	}
 
 	// Initialize dataset sender if user opted in to contribute data
@@ -168,6 +155,22 @@ func NewDaemon(config Config) (*Daemon, error) {
 		}
 	}
 
+	var retriever ctx.Retriever
+	if config.Provider.RetrievalEnabled {
+		retriever = index.NewManager(index.Options{})
+	}
+
+	var tracer *session.Recorder
+	if config.TraceEnabled {
+		recorder, err := session.NewRecorder(filepath.Join(config.StateDir, "sessions"), nil)
+		if err != nil {
+			logger.Warn("trace recorder disabled: %v", err)
+		} else {
+			tracer = recorder
+			logger.Info("session trace: %s", recorder.Path())
+		}
+	}
+
 	eng, err := engine.NewEngine(prov, buf, engine.EngineConfig{
 		NsID:                config.NsID,
 		ProviderName:        config.Provider.Type,
@@ -179,14 +182,18 @@ func NewDaemon(config Config) (*Daemon, error) {
 			AutoAdvance:        config.Behavior.CursorPrediction.AutoAdvance,
 			ProximityThreshold: config.Behavior.CursorPrediction.ProximityThreshold,
 		},
-		MaxDiffTokens:    config.Provider.MaxDiffHistoryTokens,
-		MaxVisibleLines:  config.Behavior.MaxVisibleLines,
-		DisabledIn:       config.Behavior.DisabledIn,
-		CompleteInInsert: config.Behavior.CompleteInInsert,
-		CompleteInNormal: config.Behavior.CompleteInNormal,
+		MaxDiffTokens:      config.Provider.MaxDiffHistoryTokens,
+		MaxVisibleLines:    config.Behavior.MaxVisibleLines,
+		MaxRetrievalChunks: config.Provider.RetrievalMaxChunks,
+		MinConfidence:      config.Provider.MinConfidence,
+		DisabledIn:         config.Behavior.DisabledIn,
+		CompleteInInsert:   config.Behavior.CompleteInInsert,
+		CompleteInNormal:   config.Behavior.CompleteInNormal,
 
 		NextEditProvider:  nextEditProvider,
 		NextEditIdleDelay: idleCompletionDelay,
+		Retriever:         retriever,
+		Trace:             tracer,
 	}, engine.SystemClock, datasetSender)
 	if err != nil {
 		return nil, err
@@ -199,6 +206,7 @@ func NewDaemon(config Config) (*Daemon, error) {
 		provider: prov,
 		buffer:   buf,
 		engine:   eng,
+		tracer:   tracer,
 		pidPath:  getPidPath(config.StateDir),
 		shutdown: make(chan bool, 1),
 		ctx:      ctx,
@@ -342,6 +350,9 @@ func (d *Daemon) monitorIdleShutdown() {
 func (d *Daemon) Stop() {
 	d.engine.Stop()
 	d.cancel()
+	if d.tracer != nil {
+		d.tracer.Close()
+	}
 	if d.listener != nil {
 		d.listener.Close()
 	}

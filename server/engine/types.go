@@ -6,6 +6,7 @@ import (
 
 	"cursortab/buffer"
 	"cursortab/ctx"
+	"cursortab/session"
 	"cursortab/text"
 	"cursortab/types"
 )
@@ -263,10 +264,19 @@ type EngineConfig struct {
 	CursorPrediction       CursorPredictionConfig
 	MaxDiffTokens          int      // Maximum tokens for diff history per file (0 = no limit)
 	MaxVisibleLines        int      // Maximum lines per stage (0 = no limit)
+	MaxRetrievalChunks     int      // Maximum retrieved code chunks per prompt (0 = index default)
+	MinConfidence          float64  // Drop completions below this mean token logprob (0 = off)
 	CompleteInInsert       bool     // Show completions in insert mode
 	CompleteInNormal       bool     // Show completions in normal mode
 	DisabledIn             []string // Treesitter scopes where completions are suppressed
 	DisableProviderMetrics bool     // Skip wiring provider as metrics.Sender (eval harness sets this)
+
+	// Retriever answers workspace code lookups for the retrieval material.
+	// Nil disables retrieval.
+	Retriever ctx.Retriever
+
+	// Trace records session events for offline evaluation. Nil disables it.
+	Trace *session.Recorder
 
 	// Dual mode: a second, edit-kind provider asked when the user pauses.
 	// Nil disables it. NextEditIdleDelay is how long the display must stay

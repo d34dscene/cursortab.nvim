@@ -14,6 +14,7 @@ import (
 	"cursortab/ctx"
 	"cursortab/logger"
 	"cursortab/metrics"
+	"cursortab/session"
 	"cursortab/text"
 	"cursortab/types"
 	"cursortab/utils"
@@ -108,6 +109,15 @@ type Engine struct {
 	// Config options
 	config EngineConfig
 
+	// retriever answers workspace code lookups for prompts. Nil disables
+	// retrieval entirely.
+	retriever ctx.Retriever
+
+	// tracer records session events for offline evaluation. Nil disables it.
+	tracer           *session.Recorder
+	requestStartedAt time.Time
+	lastConfidence   *float64
+
 	// Per-file state that persists across file switches (for context restoration)
 	fileStateStore map[string]*FileState
 
@@ -157,6 +167,8 @@ func NewEngine(provider Provider, buf Buffer, config EngineConfig, clock Clock, 
 		fileStateStore:      make(map[string]*FileState),
 		rejectedCompletions: make(map[string][]*rejectedCompletion),
 		nextEditProvider:    config.NextEditProvider,
+		retriever:           config.Retriever,
+		tracer:              config.Trace,
 	}
 
 	// Initialize metrics: combine provider sender + community sender if available

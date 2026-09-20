@@ -57,6 +57,10 @@ type ProviderConfig struct {
 	MaxDiffHistoryTokens int              `json:"max_diff_history_tokens"`
 	CompletionPath       string           `json:"completion_path"`
 	FIMTokens            *FIMTokensConfig `json:"fim_tokens,omitempty"`
+	RetrievalEnabled     bool             `json:"retrieval_enabled"`
+	RetrievalMaxChunks   int              `json:"retrieval_max_chunks"`
+	Logprobs             bool             `json:"logprobs"`
+	MinConfidence        float64          `json:"min_confidence"`
 	PrivacyMode          bool             `json:"privacy_mode"`
 }
 
@@ -76,6 +80,7 @@ type Config struct {
 	EditorVersion  string          `json:"editor_version"`
 	EditorOS       string          `json:"editor_os"`
 	ContributeData bool            `json:"contribute_data"`
+	TraceEnabled   bool            `json:"trace_enabled"`
 	Behavior       BehaviorConfig  `json:"behavior"`
 	Provider       ProviderConfig  `json:"provider"`
 	NextEdit       *NextEditConfig `json:"next_edit,omitempty"`
@@ -133,6 +138,12 @@ func (c *Config) Validate() error {
 	}
 	if c.Provider.MaxDiffHistoryTokens < 0 {
 		return fmt.Errorf("invalid provider.max_diff_history_tokens %d: must be >= 0", c.Provider.MaxDiffHistoryTokens)
+	}
+	if c.Provider.RetrievalMaxChunks < 0 {
+		return fmt.Errorf("invalid provider.retrieval_max_chunks %d: must be >= 0", c.Provider.RetrievalMaxChunks)
+	}
+	if c.Provider.MinConfidence > 0 {
+		return fmt.Errorf("invalid provider.min_confidence %v: must be <= 0 (mean token logprob is always <= 0, 0 disables the gate)", c.Provider.MinConfidence)
 	}
 
 	// Validate completion_path starts with /
