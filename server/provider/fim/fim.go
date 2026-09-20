@@ -28,6 +28,12 @@ var _ engine.StreamingProvider = (*Provider)(nil)
 var _ provider.CompletionFlow[*openai.CompletionRequest, *openai.CompletionResult] = (*Provider)(nil)
 var _ provider.OpenAIStreamFlow = (*Provider)(nil)
 
+func init() {
+	provider.Register(string(types.ProviderTypeFIM), func(config *types.ProviderConfig) engine.Provider {
+		return NewProvider(config)
+	})
+}
+
 func NewProvider(config *types.ProviderConfig) *Provider {
 	materials := sourcectx.Materials{sourcectx.Treesitter{}}
 	if tokens := config.FIMTokens; tokens != nil {
@@ -44,6 +50,10 @@ func NewProvider(config *types.ProviderConfig) *Provider {
 				sourcectx.Diagnostics{},
 			)
 		}
+	}
+
+	if config.RetrievalEnabled {
+		materials = append(materials, sourcectx.Retrieval{})
 	}
 
 	return &Provider{
@@ -98,7 +108,11 @@ func (p *Provider) Build(ctx *provider.RequestState) (*openai.CompletionRequest,
 
 	// Prompt+suffix mode (OpenAI completions API style): fim_tokens not configured
 	if tokens == nil {
-		req := p.Request(prefixContent.String(), nil)
+		var prefixBuilder strings.Builder
+		provider.RenderRetrievedPlain(&prefixBuilder, provider.RetrievalChunks(ctx.Input))
+		prefixBuilder.WriteString(prefixContent.String())
+
+		req := p.Request(prefixBuilder.String(), nil)
 		req.Suffix = suffixContent.String()
 		p.LogRequest(req, ctx.Window.MaxLines)
 		return req, nil
@@ -108,9 +122,12 @@ func (p *Provider) Build(ctx *provider.RequestState) (*openai.CompletionRequest,
 	var prompt strings.Builder
 
 	// Repo-level cross-file context (Qwen style with repo_name+file_sep, or
-	// Mellum style with filename headers)
+	// Mellum style with filename headers). Models without context tokens get
+	// retrieved code as bare path blocks.
 	if tokens.RepoName != "" || tokens.Filename != "" {
 		buildRepoContext(&prompt, p, ctx)
+	} else if chunks := provider.RetrievalChunks(ctx.Input); len(chunks) > 0 {
+		provider.RenderRetrievedPlain(&prompt, chunks)
 	}
 
 	if tokens.SuffixFirst {
@@ -218,6 +235,10 @@ func buildRepoContext(b *strings.Builder, p *Provider, ctx *provider.RequestStat
 		b.WriteString("\n")
 	}
 
+	// Retrieved workspace code, placed just before the current file so the
+	// most relevant declarations sit closest to the FIM tokens.
+	sectionRetrieval(b, fileSep, provider.RetrievalChunks(ctx.Input))
+
 	// Current file header
 	b.WriteString(fileSep)
 	b.WriteString(current.File.Path)
@@ -240,6 +261,7 @@ func buildFilenameContext(b *strings.Builder, p *Provider, ctx *provider.Request
 			b.WriteString("\n")
 		}
 	}
+	filenameRetrieval(b, *tokens, provider.RetrievalChunks(ctx.Input))
 	b.WriteString(tokens.Filename)
 	b.WriteString(ctx.Input.Current.File.Path)
 	b.WriteString("\n")

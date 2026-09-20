@@ -25,6 +25,7 @@ type CompletionResponse struct {
 	Completion   *Completion             // Optional; nil means no text edit.
 	CursorTarget *CursorPredictionTarget // Optional, from cursor_prediction_target
 	MetricsInfo  *MetricsInfo            // Optional, for providers that track metrics
+	Confidence   *float64                // Optional mean token logprob, nil when the provider gives none
 }
 
 // MetricsInfo holds metadata for metrics tracking
@@ -102,6 +103,31 @@ type TreesitterSymbol struct {
 // Contains either the full unified diff (when small) or extracted symbol lines.
 type GitDiffContext struct {
 	Diff string // Full unified diff or symbol summary in git diff format
+}
+
+// RetrievalQuery is a cursor-derived lookup against the workspace code index.
+// Identifiers carry the strongest signal and are scored above plain tokens.
+type RetrievalQuery struct {
+	Root        string   // Workspace root the index is built from
+	CurrentPath string   // File the cursor is in, down-weighted and never self-first
+	Identifiers []string // Names near the cursor and in the enclosing scope
+	Tokens      []string // Lower-weight lexical tokens from the surrounding lines
+	Limit       int      // Max chunks to return
+}
+
+// RetrievalChunk is one indexed code block selected for a prompt.
+type RetrievalChunk struct {
+	Path      string // Workspace-relative path
+	Kind      string // func, method, type, const, var, class, ...
+	Name      string // Declared name, best effort
+	Signature string // First line of the declaration
+	Content   string // Full source of the block
+	Score     float64
+}
+
+// RetrievalContext holds cross-file code blocks selected for a prompt.
+type RetrievalContext struct {
+	Chunks []RetrievalChunk
 }
 
 // FileDiffHistory represents cumulative diffs for a specific file in the workspace
@@ -217,6 +243,10 @@ type ProviderConfig struct {
 	CompletionPath      string          // API endpoint path (e.g., "/v1/completions")
 	FIMTokens           *FIMTokenConfig // nil = prompt+suffix mode; non-nil = tokenized FIM
 	CompletionTimeout   int             // Timeout for completion requests in milliseconds
+	RetrievalEnabled    bool            // Include workspace code retrieved for the cursor
+	RetrievalMaxChunks  int             // Max retrieved chunks per prompt (0 = default)
+	Logprobs            bool            // Request token logprobs and gate on their confidence
+	MinConfidence       float64         // Drop completions with mean token logprob below this; must be <= 0, 0 disables
 	PrivacyMode         bool            // Don't send telemetry to provider
 	Version             string          // Plugin version for metrics/telemetry
 	EditorVersion       string          // Editor version (e.g., "0.10.0")

@@ -29,8 +29,10 @@ func (e *Engine) buildContextSourceInput(opts completionInputOptions, requiremen
 			MaxRecentFileBytes: defaultMaxRecentFileBytes,
 			MaxDiffTokens:      e.config.MaxDiffTokens,
 			MaxUserActions:     defaultMaxUserActions,
+			MaxRetrievalChunks: e.config.MaxRetrievalChunks,
 			ContextChars:       materialsBudgetChars,
 		},
+		Retriever: e.retriever,
 	}
 }
 

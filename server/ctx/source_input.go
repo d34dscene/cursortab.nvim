@@ -30,11 +30,12 @@ func (materials Materials) FileContextNeeds() fileContextNeeds {
 // engine limits, but providers only see collected material values. Budget is
 // nil when the provider does not bound cross-file context.
 type ContextSourceInput struct {
-	Current  CurrentSnapshot
-	Snapshot FileContextSnapshot
-	Buffer   bufferContextReader
-	Limits   CollectionLimits
-	Budget   *Budget
+	Current   CurrentSnapshot
+	Snapshot  FileContextSnapshot
+	Buffer    bufferContextReader
+	Limits    CollectionLimits
+	Budget    *Budget
+	Retriever Retriever
 }
 
 type bufferContextReader interface {
@@ -66,6 +67,7 @@ type CollectionLimits struct {
 	MaxRecentFileBytes int
 	MaxDiffTokens      int
 	MaxUserActions     int
+	MaxRetrievalChunks int
 	// ContextChars bounds the total bytes cross-file materials may add to
 	// the prompt. Negative disables budgeting.
 	ContextChars int

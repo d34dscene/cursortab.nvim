@@ -23,9 +23,19 @@ type Provider struct {
 var _ engine.Provider = (*Provider)(nil)
 var _ provider.CompletionFlow[*openai.CompletionRequest, *openai.CompletionResult] = (*Provider)(nil)
 
+func init() {
+	provider.Register(string(types.ProviderTypeInline), func(config *types.ProviderConfig) engine.Provider {
+		return NewProvider(config)
+	})
+}
+
 func NewProvider(config *types.ProviderConfig) *Provider {
+	materials := sourcectx.Materials{sourcectx.Treesitter{}}
+	if config.RetrievalEnabled {
+		materials = append(materials, sourcectx.Retrieval{})
+	}
 	return &Provider{
-		Base:   provider.NewBase(engine.CompletionInline, sourcectx.Materials{sourcectx.Treesitter{}}, provider.SyntheticPrefetchDisabled, config),
+		Base:   provider.NewBase(engine.CompletionInline, materials, provider.SyntheticPrefetchDisabled, config),
 		OpenAI: provider.NewOpenAI(providerName, config),
 	}
 }
@@ -37,8 +47,12 @@ func (p *Provider) Complete(ctx context.Context, input sourcectx.CompletionInput
 func (p *Provider) Build(ctx *provider.RequestState) (*openai.CompletionRequest, error) {
 	var promptBuilder strings.Builder
 
+	// Retrieved workspace code comes first, as reference blocks above the
+	// code being completed.
+	provider.RenderRetrievedPlain(&promptBuilder, provider.RetrievalChunks(ctx.Input))
+
 	if len(ctx.Window.Lines) == 0 {
-		req := p.Request("", []string{"\n"})
+		req := p.Request(strings.TrimRight(promptBuilder.String(), "\n "), []string{"\n"})
 		p.LogRequest(req, ctx.Window.MaxLines)
 		return req, nil
 	}
