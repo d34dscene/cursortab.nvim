@@ -312,6 +312,7 @@ func (e *Engine) showCurrentStage() {
 	// needs for correct isPureInsertion/offset calculations.
 	e.setDisplayedStage(stage, text.CopyGroups(stage.Groups))
 	e.recordMetricsShown(e.pendingMetricsInfo, manual) // nil for streaming
+	e.traceShown(stage)
 	e.pendingMetricsInfo = nil
 }
 
@@ -384,9 +385,29 @@ func (e *Engine) processCompletionWithManual(response *types.CompletionResponse,
 	if response == nil || response.Completion == nil {
 		return completionNoChanges
 	}
+	e.lastConfidence = response.Confidence
+	if e.suppressLowConfidence(response, manual) {
+		return completionSuppressed
+	}
 
 	completion := response.Completion
 	return e.processCompletionCandidate(completion, response.CursorTarget, response.MetricsInfo, manual)
+}
+
+// suppressLowConfidence drops a completion whose provider-reported mean token
+// logprob is below the configured floor. Mean logprobs are always <= 0, so any
+// floor that gates is negative: 0 disables the gate. A provider that reports no
+// logprobs leaves Confidence nil and is never dropped here. Manual triggers
+// bypass the gate, matching the other suppression heuristics.
+func (e *Engine) suppressLowConfidence(response *types.CompletionResponse, manual bool) bool {
+	if manual || e.config.MinConfidence >= 0 || response.Confidence == nil {
+		return false
+	}
+	if *response.Confidence >= e.config.MinConfidence {
+		return false
+	}
+	logger.Debug("suppressed: low confidence %.2f < %.2f", *response.Confidence, e.config.MinConfidence)
+	return true
 }
 
 func (e *Engine) processCompletionCandidate(completion *types.Completion, cursorTarget *types.CursorPredictionTarget, metricsInfo *types.MetricsInfo, manual bool) completionOutcome {

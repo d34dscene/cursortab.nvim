@@ -52,6 +52,10 @@
 ---@field max_diff_history_tokens integer
 ---@field completion_path string API endpoint path (e.g., "/v1/completions")
 ---@field fim_tokens CursortabFIMTokensConfig|string|nil FIM tokens configuration, a preset name ("mellum"), or nil
+---@field retrieval_enabled boolean Include workspace declarations that match the cursor in the prompt
+---@field retrieval_max_chunks integer Max retrieved code chunks per prompt (0 = default 8)
+---@field logprobs boolean Request token logprobs and gate completions on their confidence
+---@field min_confidence number Drop completions with mean token logprob below this (0 = off)
 ---@field privacy_mode boolean Enable privacy mode (don't send telemetry to provider)
 
 ---@class CursortabDebugConfig
@@ -81,6 +85,7 @@
 ---@field ui CursortabUIConfig
 ---@field behavior CursortabBehaviorConfig
 ---@field contribute_data boolean Opt-in: send anonymous completion metrics to the public dataset for model training
+---@field trace_enabled boolean Record local completion session traces (JSONL) for offline evaluation
 ---@field provider CursortabProviderConfig
 ---@field next_edit CursortabNextEditConfig
 ---@field blink CursortabBlinkConfig
@@ -93,6 +98,7 @@ local default_config = {
 	log_level = "info",
 	state_dir = vim.fn.stdpath("state") .. "/cursortab",
 	contribute_data = false, -- Opt-in: send anonymous metrics to train a better gating model
+	trace_enabled = false, -- Record local completion session traces for offline evaluation
 
 	keymaps = {
 		accept = "<Tab>", -- Keymap to accept completion, or false to disable
@@ -178,6 +184,10 @@ local default_config = {
 		--     repo_name = "<|repo_name|>", -- optional; auto-detected for Qwen
 		--     file_sep = "<|file_sep|>",   -- optional; auto-detected for Qwen
 		--   }
+		retrieval_enabled = false, -- Include workspace declarations matching the cursor in the prompt
+		retrieval_max_chunks = 0, -- Max retrieved code chunks per prompt (0 = default 8)
+		logprobs = false, -- Request token logprobs and gate completions on their confidence
+		min_confidence = 0.0, -- Drop completions with mean token logprob below this; must be <= 0 (0 = off)
 		privacy_mode = true, -- Don't send telemetry to provider
 	},
 
@@ -474,6 +484,12 @@ local function validate_config(cfg)
 		end
 		if cfg.provider.max_diff_history_tokens and cfg.provider.max_diff_history_tokens < 0 then
 			error("[cursortab.nvim] provider.max_diff_history_tokens must be >= 0")
+		end
+		if cfg.provider.retrieval_max_chunks and cfg.provider.retrieval_max_chunks < 0 then
+			error("[cursortab.nvim] provider.retrieval_max_chunks must be >= 0")
+		end
+		if cfg.provider.min_confidence and cfg.provider.min_confidence > 0 then
+			error("[cursortab.nvim] provider.min_confidence must be <= 0 (mean token logprob is always <= 0, 0 disables the gate)")
 		end
 		if cfg.provider.completion_path and not cfg.provider.completion_path:match("^/") then
 			error("[cursortab.nvim] provider.completion_path must start with '/'")

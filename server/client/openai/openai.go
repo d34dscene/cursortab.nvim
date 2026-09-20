@@ -23,10 +23,41 @@ type CompletionRequest struct {
 	TopK        int      `json:"top_k,omitempty"`
 	MinP        float64  `json:"min_p,omitempty"`
 	RepeatPen   float64  `json:"repeat_penalty,omitempty"`
+	Logprobs    int      `json:"logprobs,omitempty"`
 	Stop        []string `json:"stop,omitempty"`
 	N           int      `json:"n"`
 	Echo        bool     `json:"echo"`
 	Stream      bool     `json:"stream"`
+}
+
+// Logprobs holds per-token log probabilities for one completion choice. Both
+// the legacy completions shape (tokens + token_logprobs) and the content-item
+// shape (llama.cpp, OpenAI chat completions) decode into it.
+type Logprobs struct {
+	Tokens        []string  `json:"tokens"`
+	TokenLogprobs []float64 `json:"token_logprobs"`
+	Content       []Logprob `json:"content"`
+}
+
+// Logprob is one content-item entry.
+type Logprob struct {
+	Token   string  `json:"token"`
+	Logprob float64 `json:"logprob"`
+}
+
+// LogprobValues returns the per-token log probabilities, or nil when absent.
+func (l *Logprobs) LogprobValues() []float64 {
+	if l == nil {
+		return nil
+	}
+	if len(l.Content) > 0 {
+		values := make([]float64, len(l.Content))
+		for i, item := range l.Content {
+			values[i] = item.Logprob
+		}
+		return values
+	}
+	return l.TokenLogprobs
 }
 
 // CompletionResponse matches the OpenAI Completion API response format
@@ -36,10 +67,10 @@ type CompletionResponse struct {
 	Created int64  `json:"created"`
 	Model   string `json:"model"`
 	Choices []struct {
-		Index        int    `json:"index"`
-		Text         string `json:"text"`
-		Logprobs     any    `json:"logprobs"`
-		FinishReason string `json:"finish_reason"`
+		Index        int       `json:"index"`
+		Text         string    `json:"text"`
+		Logprobs     *Logprobs `json:"logprobs"`
+		FinishReason string    `json:"finish_reason"`
 	} `json:"choices"`
 	Usage struct {
 		PromptTokens     int `json:"prompt_tokens"`
@@ -55,9 +86,10 @@ type StreamChunk struct {
 	Created int64  `json:"created"`
 	Model   string `json:"model"`
 	Choices []struct {
-		Index        int    `json:"index"`
-		Text         string `json:"text"`
-		FinishReason string `json:"finish_reason"`
+		Index        int       `json:"index"`
+		Text         string    `json:"text"`
+		Logprobs     *Logprobs `json:"logprobs"`
+		FinishReason string    `json:"finish_reason"`
 	} `json:"choices"`
 }
 
@@ -66,7 +98,13 @@ type CompletionResult struct {
 	Text         string
 	FinishReason string
 	StoppedEarly bool
+	Logprobs     *Logprobs
 	Err          error
+}
+
+// LogprobValues returns the per-token log probabilities, or nil when absent.
+func (r *CompletionResult) LogprobValues() []float64 {
+	return r.Logprobs.LogprobValues()
 }
 
 // LineStream provides incremental line-by-line streaming
@@ -212,13 +250,22 @@ func (c *Client) runLineStream(ctx context.Context, req *CompletionRequest, line
 }
 
 // processLineStream reads SSE events and emits complete lines
-func (c *Client) processLineStream(ctx context.Context, body io.Reader, lines chan<- string, maxLines int, stopTokens []string) CompletionResult {
+func (c *Client) processLineStream(ctx context.Context, body io.Reader, lines chan<- string, maxLines int, stopTokens []string) (result CompletionResult) {
 	var textBuilder strings.Builder
 	var lineBuffer strings.Builder
 	pending := ""
 	var finishReason string
 	lineCount := 0
 	stoppedEarly := false
+
+	// Token logprobs arrive per chunk when requested; collect them across the
+	// stream and attach them to whichever result the stream ends with.
+	var streamLogprobs []float64
+	defer func() {
+		if len(streamLogprobs) > 0 {
+			result.Logprobs = &Logprobs{TokenLogprobs: streamLogprobs}
+		}
+	}()
 
 	longestStopToken := 0
 	for _, token := range stopTokens {
@@ -330,6 +377,9 @@ func (c *Client) processLineStream(ctx context.Context, body io.Reader, lines ch
 
 		// Extract text from chunk
 		if len(chunk.Choices) > 0 {
+			if lp := chunk.Choices[0].Logprobs; lp != nil {
+				streamLogprobs = append(streamLogprobs, lp.LogprobValues()...)
+			}
 			pending += chunk.Choices[0].Text
 
 			if idx, ok := findStop(pending); ok {

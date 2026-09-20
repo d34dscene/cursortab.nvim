@@ -145,7 +145,11 @@ func StartBatch[RequestPayload any, RawResult any](
 		return nil, err
 	}
 	response, err := flow.Parse(state, raw)
-	return response, err
+	if err != nil {
+		return nil, err
+	}
+	attachConfidence(response, raw)
+	return response, nil
 }
 
 func EmptyResponse() *types.CompletionResponse {

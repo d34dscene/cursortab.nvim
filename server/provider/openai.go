@@ -48,6 +48,7 @@ func (o OpenAI) Call(ctx context.Context, req *openai.CompletionRequest) (*opena
 		result = &openai.CompletionResult{
 			Text:         resp.Choices[0].Text,
 			FinishReason: resp.Choices[0].FinishReason,
+			Logprobs:     resp.Choices[0].Logprobs,
 		}
 	}
 	logOpenAIResponse(o.name, result)
@@ -83,10 +84,21 @@ func (o OpenAI) Request(prompt string, stop []string) *openai.CompletionRequest 
 		TopK:        o.config.ProviderTopK,
 		MinP:        o.config.ProviderMinP,
 		RepeatPen:   o.config.ProviderRepeatPen,
+		Logprobs:    logprobCount(o.config),
 		Stop:        stop,
 		N:           1,
 		Echo:        false,
 	}
+}
+
+// logprobCount is the OpenAI completions `logprobs` request value: the number
+// of most-likely tokens to return per position. One is enough to read the
+// chosen token's confidence.
+func logprobCount(config *types.ProviderConfig) int {
+	if config.Logprobs {
+		return 1
+	}
+	return 0
 }
 
 func logOpenAIResponse(name string, result *openai.CompletionResult) {
@@ -204,9 +216,16 @@ func (s *lineStreamSession) Finish() (*types.CompletionResponse, error) {
 		Text:         rawResult.Text,
 		FinishReason: rawResult.FinishReason,
 		StoppedEarly: rawResult.StoppedEarly,
+		Logprobs:     rawResult.Logprobs,
 	}
 	logOpenAIResponse(s.name, result)
-	return s.parse(s.state, result)
+
+	response, err := s.parse(s.state, result)
+	if err != nil {
+		return nil, err
+	}
+	attachConfidence(response, result)
+	return response, nil
 }
 
 func (s *lineStreamSession) forward() {
