@@ -15,33 +15,33 @@ A Neovim plugin that provides edit completions and cursor predictions.
 
 <!-- mtoc-start -->
 
-* [Requirements](#requirements)
-* [Installation](#installation)
-  * [Mercury API (hosted, no local GPU needed)](#mercury-api-hosted-no-local-gpu-needed)
-  * [Zeta-2.1 (local next-edit prediction)](#zeta-21-local-next-edit-prediction)
-  * [Qwen3.5-0.8B/Sweep (fastest local)](#qwen35-08bsweep-fastest-local)
-  * [Using lazy.nvim](#using-lazynvim)
-  * [Using packer.nvim](#using-packernvim)
-* [Configuration](#configuration)
-  * [Highlight Groups](#highlight-groups)
-  * [Providers](#providers)
-    * [Benchmarks](#benchmarks)
-    * [Inline Provider (Default)](#inline-provider-default)
-    * [FIM Provider](#fim-provider)
-    * [Sweep Provider](#sweep-provider)
-    * [Zeta-2.1 Provider](#zeta-21-provider)
-    * [Zeta-2 Provider](#zeta-2-provider)
-    * [Zeta Provider (legacy)](#zeta-provider-legacy)
-    * [Copilot Provider](#copilot-provider)
-    * [Windsurf Provider](#windsurf-provider)
-    * [Mercury API Provider](#mercury-api-provider)
-  * [blink.cmp Integration](#blinkcmp-integration)
-* [Usage](#usage)
-  * [Commands](#commands)
-* [Development](#development)
-* [FAQ](#faq)
-* [Contributing](#contributing)
-* [License](#license)
+- [Requirements](#requirements)
+- [Installation](#installation)
+  - [Mercury API (hosted, no local GPU needed)](#mercury-api-hosted-no-local-gpu-needed)
+  - [Zeta-2.1 (local next-edit prediction)](#zeta-21-local-next-edit-prediction)
+  - [Qwen3.5-0.8B/Sweep (fastest local)](#qwen35-08bsweep-fastest-local)
+  - [Using lazy.nvim](#using-lazynvim)
+  - [Using packer.nvim](#using-packernvim)
+- [Configuration](#configuration)
+  - [Highlight Groups](#highlight-groups)
+  - [Providers](#providers)
+    - [Benchmarks](#benchmarks)
+    - [Inline Provider (Default)](#inline-provider-default)
+    - [FIM Provider](#fim-provider)
+    - [Sweep Provider](#sweep-provider)
+    - [Zeta-2.1 Provider](#zeta-21-provider)
+    - [Zeta-2 Provider](#zeta-2-provider)
+    - [Zeta Provider (legacy)](#zeta-provider-legacy)
+    - [Copilot Provider](#copilot-provider)
+    - [Windsurf Provider](#windsurf-provider)
+    - [Mercury API Provider](#mercury-api-provider)
+  - [blink.cmp Integration](#blinkcmp-integration)
+- [Usage](#usage)
+  - [Commands](#commands)
+- [Development](#development)
+- [FAQ](#faq)
+- [Contributing](#contributing)
+- [License](#license)
 
 <!-- mtoc-end -->
 
@@ -149,6 +149,7 @@ require("cursortab").setup({
   log_level = "info",  -- "trace", "debug", "info", "warn", "error"
   state_dir = vim.fn.stdpath("state") .. "/cursortab",  -- Directory for runtime files (log, socket, pid)
   contribute_data = false,  -- Opt-in: send anonymous metrics to train a better gating model
+  trace_enabled = false,    -- Record local completion session traces for offline evaluation
 
   keymaps = {
     accept = "<Tab>",           -- Keymap to accept completion, or false to disable
@@ -227,6 +228,10 @@ require("cursortab").setup({
     --     filename = "<filename>",         -- optional; Mellum per-file context headers
     --   },
     privacy_mode = true,                  -- Don't send telemetry to provider
+    retrieval_enabled = false,            -- Include matching workspace code in the prompt
+    retrieval_max_chunks = 0,             -- Max retrieved chunks per prompt (0 = default 8)
+    logprobs = false,                     -- Request token logprobs and gate on confidence
+    min_confidence = 0.0,                 -- Drop completions with mean token logprob below this (0 = off)
   },
 
   next_edit = {
@@ -277,6 +282,29 @@ vim.api.nvim_set_hl(0, "CursorTabAddition", { bg = "#1a3a1a" })
 The plugin supports nine AI provider backends: Inline, FIM, Sweep, Zeta-2.1,
 Zeta-2, Zeta (legacy), Copilot, Windsurf, and Mercury API.
 
+They sit on three transports:
+
+| Transport                           | Providers                                              |
+| ----------------------------------- | ------------------------------------------------------ |
+| OpenAI-compatible `/v1/completions` | inline, fim, sweep, zeta, zeta-2, zeta-2.1, mercuryapi |
+| Copilot LSP                         | copilot                                                |
+| Windsurf service                    | windsurf                                               |
+
+Two task profiles use them. **Insert** profiles (`inline`, `fim`) complete
+inside the current line. **Edit** profiles (`sweep`, `zeta`, `zeta-2`,
+`zeta-2.1`, `mercuryapi`) predict a rewrite of a nearby region and can drive
+cursor targets.
+
+Prompt formats stay per-profile because they genuinely differ: SeedCoder
+V0211, SeedCoder V0318 numbered boundaries, Mercury region markers, and the
+FIM token layouts. What is shared lives in the `provider` package: request
+windowing and token budgeting, streaming, diff history and diagnostics
+formatting, retrieval rendering, and confidence. Each profile registers
+itself with `provider.Register` at init, so the daemon and the eval harness
+build providers through one `provider.Build` call instead of a switch each.
+Copilot and Windsurf are not registered: they need the editor buffer or a live
+LSP shim, so their callers construct them.
+
 | Provider     | Hosted | Multi-line | Multi-edit | Cursor Prediction | Streaming | Model                     |
 | ------------ | :----: | :--------: | :--------: | :---------------: | :-------: | ------------------------- |
 | `inline`     |        |            |            |                   |           | Any base model            |
@@ -306,6 +334,64 @@ Zeta-2, Zeta (legacy), Copilot, Windsurf, and Mercury API.
 or the Mellum `filename` token. Auto-detected presets apply for Qwen (via
 `repo_name`/`file_sep`) and Mellum (via the `fim_tokens = "mellum"` preset);
 set manually for other models that support them.
+
+#### Retrieval
+
+Local models produce generically plausible code because they only see the
+buffer and, at best, whatever files were edited most recently. Recency is the
+wrong signal: the completion usually needs the declaration that shares a name
+with what is being written, wherever it lives.
+
+Set `retrieval_enabled = true` to index the workspace and add the matching
+declarations to the prompt. The index is built once per workspace in the
+background, so the first lookup returns nothing and later ones hit a warm
+cache. Go declarations are extracted with the real Go parser, other languages
+with a brace/indent scan. Ranking is identifier-first: a name match beats a
+generic word, a same-directory match gets a boost, at most two chunks come
+from any one file, and duplicate declarations collapse to one.
+
+Two rules keep retrieved context from hurting:
+
+- **Functions send their signature, not their body.** A retrieved body leaks
+  straight into the completion. In testing, a chunk ending in `return nil, nil`
+  made a 7B model emit exactly that instead of the call the user needed. Types,
+  consts, and vars have no body to leak, so they keep their full text.
+- **The current file is never retrieved.** It is already in the provider's
+  window, and re-sending its declarations makes the model read its own
+  enclosing function as a reference and copy from it.
+
+Retrieved chunks render in the provider's cross-file format (`<filename>`
+blocks for Mellum, `file_sep` sections for Qwen, plain path headers
+otherwise), tagged with their real workspace-relative path.
+
+`retrieval_max_chunks` caps how many chunks are added. Retrieved context
+shares the provider's `context_size` budget with the rest of the cross-file
+context.
+
+#### Confidence gating
+
+Set `logprobs = true` to request per-token log probabilities and record a mean
+confidence per completion. Set `min_confidence` to a negative value such as
+`-1.5` to drop completions below that floor. Mean logprobs are always `<= 0`,
+so `0` disables the gate. Manual triggers bypass it, and providers that do not
+report logprobs are never gated.
+
+This is the cheapest way to stop low-quality suggestions from appearing at
+all. Lower show rate with higher precision is the goal.
+
+#### Local serving notes
+
+Two serving flags matter more for perceived speed than the model choice:
+
+- `--cache-reuse` on llama.cpp, so the KV cache for the unchanged prefix is
+  reused across keystrokes. This is what makes the request right after a
+  keystroke fast.
+- Speculative decoding (`--model-draft` with a small model, e.g. a 0.5B of the
+  same family) against the target. Typically 2 to 3x decode throughput, which
+  is what keeps a completion inside a short pause.
+
+Keep completions short (`max_tokens` 64 to 128) and lean on streaming plus
+cursor-target prefetch rather than generating far ahead.
 
 #### Benchmarks
 
@@ -409,7 +495,8 @@ The `filename` token enables Mellum-style cross-file context: recently edited
 files are prepended as `<filename>path\n<content>` blocks before the FIM
 tokens. In experiments this measurably improved API accuracy when the answer
 depends on helpers defined in other files.
-```
+
+````
 
 Note: on llama.cpp servers, the prompt+suffix mode above relies on the FIM
 token metadata in the GGUF. Some models (e.g. Mellum) produce empty or
@@ -419,7 +506,7 @@ switch to the tokenized mode.
 
 ```bash
 llama-server -hf unsloth/Qwen3.5-0.8B-GGUF:Q8_0 --port 8000
-```
+````
 
 </details>
 

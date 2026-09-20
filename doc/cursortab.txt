@@ -48,6 +48,7 @@ Full configuration with defaults: >lua
     enabled = true,
     log_level = "info",  -- "trace", "debug", "info", "warn", "error"
     state_dir = vim.fn.stdpath("state") .. "/cursortab",  -- Directory for runtime files
+    trace_enabled = false,  -- Record local completion session traces for offline evaluation
 
     keymaps = {
       accept = "<Tab>",           -- Keymap to accept completion, or false to disable
@@ -122,6 +123,11 @@ Full configuration with defaults: >lua
       --     repo_name = "<|repo_name|>", -- optional; auto-detected for Qwen
       --     file_sep = "<|file_sep|>",   -- optional; auto-detected for Qwen
       --   },
+      privacy_mode = true,
+      retrieval_enabled = false,    -- include matching workspace code in the prompt
+      retrieval_max_chunks = 0,     -- max retrieved chunks per prompt (0 = default 8)
+      logprobs = false,             -- request token logprobs and gate on confidence
+      min_confidence = 0.0,         -- drop completions with mean token logprob below this (<= 0; 0 = off)
     },
 
     blink = {
@@ -293,6 +299,13 @@ PROVIDER OPTIONS                                    *cursortab-config-provider*
       - windsurf: Windsurf completions
       - mercuryapi: Inception Labs' Mercury hosted Next-Edit model
 
+      Providers sit on three transports: OpenAI-compatible /v1/completions
+      (inline, fim, sweep, zeta, zeta-2, zeta-2.1, mercuryapi), the Copilot
+      LSP (copilot), and the Windsurf service (windsurf). Insert profiles
+      (inline, fim) complete inside the current line. Edit profiles (sweep,
+      zeta, zeta-2, zeta-2.1, mercuryapi) predict a rewrite of a nearby
+      region and can drive cursor targets.
+
   `url`
       URL of the provider server.
 
@@ -362,6 +375,54 @@ PROVIDER OPTIONS                                    *cursortab-config-provider*
   `privacy_mode`                         *cursortab-config-provider-privacy-mode*
       Don't send telemetry to provider. When enabled, providers that support
       this option will not send usage metrics. Default: true.
+
+  `retrieval_enabled`                    *cursortab-config-provider-retrieval*
+      Include declarations from the workspace that match the cursor in the
+      prompt. The plugin indexes the workspace once in the background (Go
+      declarations via the Go parser, other languages via a brace/indent
+      scan) and adds the chunks whose names overlap the code around the
+      cursor. This is what lets a local model use your own helper and type
+      names instead of guessing generic ones.
+
+      Functions contribute their signature only, never their body: a
+      retrieved body leaks into the completion (a chunk ending in
+      `return nil, nil` gets copied verbatim). Types, consts, and vars keep
+      their full text. The current file is never retrieved, because it is
+      already in the provider window and re-sending its declarations makes
+      the model copy from its own enclosing function.
+
+      The FIM provider renders retrieved chunks in the same format as its
+      other cross-file context: `<filename>` blocks for Mellum, `file_sep`
+      sections for Qwen, and plain path headers for prompt+suffix models.
+      The first lookup in a workspace returns nothing while the index builds.
+
+      Default: false. Set `retrieval_max_chunks` to cap how many chunks are
+      added.
+
+  `retrieval_max_chunks`
+      Maximum retrieved code chunks per prompt. 0 uses the default of 8.
+
+  `logprobs`
+      Request per-token log probabilities from the provider and record a
+      mean confidence for each completion. Required for `min_confidence`.
+      Default: false.
+
+  `min_confidence`
+      Drop completions whose mean token logprob is below this value. Mean
+      logprobs are always <= 0, so a value that gates is negative, for
+      example -1.5. 0 disables the gate. Manual triggers always bypass it.
+      Providers that do not report logprobs are never gated. Default: 0.
+
+------------------------------------------------------------------------------
+SESSION TRACE OPTIONS                                *cursortab-config-tracing*
+
+  `trace_enabled`
+      Record a JSONL trace of every completion request, show, accept, and
+      reject under `state_dir/sessions/`. Each line carries the file path,
+      request source, line range, confidence, and request-to-show latency.
+      Used to compute precision, latency, and stability for real editing
+      sessions offline, which is what tuning gating and retrieval needs.
+      Default: false.
 
 ------------------------------------------------------------------------------
 BLINK OPTIONS                                            *cursortab-config-blink*
