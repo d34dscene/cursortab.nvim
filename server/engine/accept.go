@@ -2,33 +2,26 @@ package engine
 
 import (
 	"cursortab/logger"
-	"cursortab/metrics"
 	"cursortab/text"
-	"cursortab/types"
 	"cursortab/utils"
 )
 
 // reject clears all state and returns to idle without caching the current
-// completion as rejected. Cancels in-flight, prefetch, and any leftover stream
-// from a prior accept-during-streaming, drops staged completions, clears the
-// UI, and sends a reject metric if a completion was shown.
+// completion as rejected. Cancels in-flight work and any leftover stream
+// from a prior accept-during-streaming, drops staged completions, and clears
+// the UI. Timer ownership stays with the caller.
 func (e *Engine) reject() {
-	e.cancelCurrentRequest()
-	e.cancelPrefetch()
+	e.cancelPending()
 	e.cancelStreaming()
 	e.buffer.ClearUI()
-	if e.display.hasCompletion() {
-		e.sendMetric(metrics.EventRejected)
-		e.traceRejected()
-	}
 	e.cursorTarget = nil
 	e.stagedCompletion = nil
 	e.resetCompletionFields()
 	e.state = stateIdle
 }
 
-// rejectAndRemember clears all state and caches the current completion so
-// similar completions are suppressed for a short TTL.
+// rejectAndRemember clears all state and caches the current completion so an
+// identical completion is suppressed for the rejection TTL.
 func (e *Engine) rejectAndRemember() {
 	e.rememberRejectedCompletion()
 	e.reject()
@@ -41,7 +34,7 @@ func (e *Engine) acceptCompletion() {
 		return
 	}
 
-	batch := e.display.batchToApply()
+	batch := e.display.batch
 	if batch == nil {
 		return
 	}
@@ -54,46 +47,26 @@ func (e *Engine) acceptCompletion() {
 	e.buffer.CommitPending()
 	e.saveCurrentFileState()
 
-	e.sendMetric(metrics.EventAccepted)
-	e.traceAccepted()
-
-	// Accept = forward progress; any cached rejections for this file are stale.
+	// Accept = forward progress: any cached rejections for this file are stale.
 	e.forgetRejectedCompletions(e.buffer.Path())
 
 	// Sync the current staged completion with what was actually rendered.
 	// When streaming renders a stage incrementally, Finalize() recomputes stages
 	// from scratch and may produce different boundaries. The staged completion's
-	// current stage must match the rendered completion for correct offset calculation
-	// in advanceStagedCompletion.
-	if e.stagedCompletion != nil && e.display.hasCompletion() {
+	// current stage must match the rendered completion for correct offset
+	// calculation in advanceStagedCompletion.
+	if e.stagedCompletion != nil && e.display.completion != nil {
 		currentStage := e.getStage(e.stagedCompletion.CurrentIdx)
 		if currentStage != nil {
-			rendered := e.display.current()
+			rendered := e.display.completion
 			currentStage.Lines = rendered.Lines
 			currentStage.BufferStart = rendered.StartLine
 			currentStage.BufferEnd = rendered.EndLineInc
-			currentStage.Groups = e.display.textGroups()
+			currentStage.Groups = e.display.groups
 		}
 	}
 
 	e.resetCompletionFields()
-
-	isLastStage := e.stagedCompletion != nil &&
-		e.stagedCompletion.CurrentIdx == len(e.stagedCompletion.Stages)-1
-	if isLastStage && e.cursorTarget != nil && e.cursorTarget.ShouldRetrigger {
-		if prefetch := e.readyPrefetchCompletion(); prefetch != nil {
-			currentStage := e.getStage(e.stagedCompletion.CurrentIdx)
-			prefetchResultEnd := prefetch.StartLine + len(prefetch.Lines) - 1
-
-			// Only use prefetch if it has content beyond the stage just applied
-			if currentStage != nil && prefetchResultEnd > currentStage.BufferEnd {
-				e.syncBuffer()
-				if e.tryShowPrefetchedCompletion() {
-					return
-				}
-			}
-		}
-	}
 
 	if e.stagedCompletion != nil {
 		e.advanceStagedCompletion()
@@ -101,26 +74,11 @@ func (e *Engine) acceptCompletion() {
 
 	if e.hasMoreStages() {
 		e.syncBuffer()
-		e.prefetchAtNMinusOne()
 		e.showOrNavigateToNextStage()
 		return
 	}
 
 	e.syncBuffer()
-	if e.cursorTarget != nil && e.cursorTarget.ShouldRetrigger {
-		if e.readyPrefetchCompletion() != nil {
-			if e.tryShowPrefetchedCompletion() {
-				return
-			}
-		}
-		if e.hasInflightPrefetch() {
-			e.setInflightPrefetchWait(prefetchAfterTab)
-			e.buffer.ClearUI()
-			e.state = stateIdle
-			return
-		}
-		e.prefetchAtCursorTarget()
-	}
 	e.transitionAfterAccept()
 }
 
@@ -134,7 +92,7 @@ func (e *Engine) acceptCursorTarget() {
 		logger.Error("acceptCursorTarget: move cursor failed: %v", err)
 	}
 
-	// Accept = forward progress; any cached rejections for this file are stale.
+	// Accept = forward progress: any cached rejections for this file are stale.
 	e.forgetRejectedCompletions(e.buffer.Path())
 
 	if e.hasMoreStages() {
@@ -145,19 +103,8 @@ func (e *Engine) acceptCursorTarget() {
 
 	e.syncBuffer()
 
-	if e.readyPrefetchCompletion() != nil {
-		if e.tryShowPrefetchedCompletion() {
-			return
-		}
-	}
-
-	if e.hasInflightPrefetch() {
-		e.setInflightPrefetchWait(prefetchAfterTab)
-		return
-	}
-
 	if e.cursorTarget.ShouldRetrigger {
-		e.requestCompletion(types.CompletionSourceTyping, false)
+		e.requestCompletion(SourceTyping, false)
 		e.cursorTarget = nil
 		return
 	}
@@ -187,26 +134,13 @@ func (e *Engine) advanceStagedCompletion() {
 	e.stagedCompletion.CurrentIdx++
 
 	if e.stagedCompletion.CurrentIdx >= len(e.stagedCompletion.Stages) {
-		// Clear prefetch only if it overlaps with the stage just applied.
-		// If prefetch is for a different line range, it can still be used.
-		// Note: Use the resulting line range (StartLine + len(Lines) - 1) since
-		// the completion may add lines beyond EndLineInc.
-		if currentStage != nil {
-			prefetch := e.readyPrefetchCompletion()
-			if prefetch != nil {
-				prefetchResultEnd := prefetch.StartLine + len(prefetch.Lines) - 1
-				if prefetch.StartLine <= currentStage.BufferEnd && prefetchResultEnd >= currentStage.BufferStart {
-					e.clearPrefetch()
-				}
-			}
-		}
 		e.stagedCompletion = nil
 		return
 	}
 
 	// Apply cumulative offset to remaining stages that are at or after the
-	// applied stage's buffer position. Stages before the applied position
-	// are unaffected by the line count change.
+	// applied stage's buffer position. Stages before the applied position are
+	// unaffected by the line count change.
 	if e.stagedCompletion.CumulativeOffset != 0 && currentStage != nil {
 		appliedStart := currentStage.BufferStart
 		for i := e.stagedCompletion.CurrentIdx; i < len(e.stagedCompletion.Stages); i++ {
@@ -234,7 +168,7 @@ func (e *Engine) hasMoreStages() bool {
 }
 
 func (e *Engine) showOrNavigateToNextStage() {
-	nextStage := e.getStage(e.stagedCompletion.CurrentIdx)
+	nextStage := e.getStage(-1)
 	if nextStage == nil {
 		return
 	}
@@ -273,11 +207,11 @@ func (e *Engine) transitionAfterAccept() {
 }
 
 func (e *Engine) partialAcceptCompletion() {
-	if !e.display.hasCompletion() {
+	if e.display.completion == nil {
 		return
 	}
 
-	groups := e.display.textGroups()
+	groups := e.display.groups
 	if len(groups) == 0 {
 		return
 	}
@@ -292,12 +226,13 @@ func (e *Engine) partialAcceptCompletion() {
 }
 
 func (e *Engine) partialAcceptAppendChars(group *text.Group) {
-	completion := e.display.current()
+	completion := e.display.completion
 	if group == nil || completion == nil || len(completion.Lines) == 0 {
 		return
 	}
 
 	e.syncBuffer()
+
 	bufferLines := e.buffer.Lines()
 	lineIdx := group.BufferLine - 1
 
@@ -333,12 +268,12 @@ func (e *Engine) partialAcceptAppendChars(group *text.Group) {
 }
 
 func (e *Engine) advanceToNextLineOrFinalize() {
-	if !e.display.hasCompletion() {
+	if e.display.completion == nil {
 		e.finalizePartialAccept()
 		return
 	}
 
-	completion := e.display.current()
+	completion := e.display.completion
 
 	if len(completion.Lines) > 1 {
 		if !e.display.advanceLine(false) {
@@ -353,7 +288,7 @@ func (e *Engine) advanceToNextLineOrFinalize() {
 }
 
 func (e *Engine) partialAcceptNextLine() {
-	completion := e.display.current()
+	completion := e.display.completion
 	if completion == nil || len(completion.Lines) == 0 {
 		return
 	}
@@ -364,7 +299,7 @@ func (e *Engine) partialAcceptNextLine() {
 	firstLine := completion.Lines[0]
 
 	isInsertion := completion.StartLine > len(bufferLines)
-	groups := e.display.textGroups()
+	groups := e.display.groups
 	if !isInsertion && len(groups) > 0 && groups[0].StartLine == 1 && groups[0].Type == "addition" {
 		isInsertion = true
 	}
@@ -415,20 +350,11 @@ func (e *Engine) finalizePartialAccept() {
 
 	if e.hasMoreStages() {
 		e.syncBuffer()
-		e.prefetchAtNMinusOne()
 		e.showOrNavigateToNextStage()
 		return
 	}
 
 	e.syncBuffer()
-	if e.cursorTarget != nil && e.cursorTarget.ShouldRetrigger {
-		if e.readyPrefetchCompletion() != nil {
-			if e.tryShowPrefetchedCompletion() {
-				return
-			}
-		}
-		e.prefetchAtCursorTarget()
-	}
 	e.transitionAfterAccept()
 }
 
@@ -477,8 +403,8 @@ func advanceGroupsAfterAccept(groups []*text.Group, wasInsertion bool) []*text.G
 }
 
 func (e *Engine) rerenderPartial() {
-	completion := e.display.current()
-	groups := e.display.textGroups()
+	completion := e.display.completion
+	groups := e.display.groups
 	if completion == nil || len(groups) == 0 {
 		return
 	}

@@ -1,13 +1,6 @@
-// Package all imports every config-buildable provider so their init
-// registrations run. Import it for side effects wherever a provider is built
-// from a type name.
+// Package all pulls in the provider registry for historical blank imports.
+// Registration lives inside provider itself, so importing it here is what a
+// side-effect import needs to keep working.
 package all
 
-import (
-	_ "cursortab/provider/fim"
-	_ "cursortab/provider/inline"
-	_ "cursortab/provider/mercuryapi"
-	_ "cursortab/provider/sweep"
-	_ "cursortab/provider/zeta"
-	_ "cursortab/provider/zeta2"
-)
+import _ "cursortab/provider"

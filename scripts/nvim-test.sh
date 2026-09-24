@@ -58,15 +58,25 @@ TAG="v$VERSION"
 OS="$(uname -s)"
 ARCH="$(uname -m)"
 
-if [[ "$OS" != "Darwin" ]]; then
-    echo "Error: only macOS is supported by this script" >&2
-    exit 1
-fi
-
-case "$ARCH" in
-    arm64)  NVIM_ASSET="nvim-macos-arm64" ;;
-    x86_64) NVIM_ASSET="nvim-macos-x86_64" ;;
-    *) echo "Error: unsupported arch: $ARCH" >&2; exit 1 ;;
+case "$OS" in
+    Darwin)
+        case "$ARCH" in
+            arm64)  NVIM_ASSET="nvim-macos-arm64" ;;
+            x86_64) NVIM_ASSET="nvim-macos-x86_64" ;;
+            *) echo "Error: unsupported arch: $ARCH" >&2; exit 1 ;;
+        esac
+        ;;
+    Linux)
+        # Neovim renamed release assets at 0.10.4 (nvim-linux64 -> nvim-linux-x86_64).
+        NEW_NAMING="$(printf '%s\n' 0.10.4 "$VERSION" | sort -V | head -1)"
+        case "$ARCH" in
+            x86_64)
+                if [[ "$NEW_NAMING" == "0.10.4" ]]; then NVIM_ASSET="nvim-linux-x86_64"; else NVIM_ASSET="nvim-linux64"; fi ;;
+            aarch64|arm64) NVIM_ASSET="nvim-linux-arm64" ;;
+            *) echo "Error: unsupported arch: $ARCH" >&2; exit 1 ;;
+        esac
+        ;;
+    *) echo "Error: unsupported OS: $OS" >&2; exit 1 ;;
 esac
 
 # --- download & cache ---

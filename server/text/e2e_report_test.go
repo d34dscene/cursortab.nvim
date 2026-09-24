@@ -9,15 +9,6 @@ import (
 	"strings"
 )
 
-func allMaxLinesPass(f fixtureResult) bool {
-	for _, mlr := range f.MaxLinesResults {
-		if !mlr.ApplyPass || !mlr.PartialAcceptPass {
-			return false
-		}
-	}
-	return true
-}
-
 func renderJSONSection(b *strings.Builder, batchData, incData []map[string]any, open bool) {
 	batchJSON, _ := json.MarshalIndent(batchData, "", "  ")
 	incJSON, _ := json.MarshalIndent(incData, "", "  ")
@@ -34,13 +25,15 @@ func renderJSONSection(b *strings.Builder, batchData, incData []map[string]any, 
 	b.WriteString("</details></div>\n")
 }
 
+// generateReport renders the fixture comparison report. It is only invoked
+// from TestReport, which is gated behind -run TestReport.
 func generateReport(fixtures []fixtureResult, outputPath string) error {
 	var b strings.Builder
 
 	var totalFixtures, passCount, failCount, unverifiedCount int
 	for _, f := range fixtures {
 		totalFixtures++
-		testPass := f.BatchPass && f.IncrementalPass && allMaxLinesPass(f)
+		testPass := f.BatchPass && f.IncrementalPass
 		if !testPass {
 			failCount++
 		} else if !f.Verified {
@@ -69,26 +62,8 @@ func generateReport(fixtures []fixtureResult, outputPath string) error {
 		if !f.IncrementalPass {
 			iStatus = `<span class="fail">inc:FAIL</span>`
 		}
-		var applyStatuses string
-		for _, mlr := range f.MaxLinesResults {
-			label := "default"
-			if mlr.MaxLines > 0 {
-				label = fmt.Sprintf("ml%d", mlr.MaxLines)
-			}
-			if mlr.ApplyPass {
-				applyStatuses += fmt.Sprintf(` <span class="pass">apply(%s):pass</span>`, label)
-			} else {
-				applyStatuses += fmt.Sprintf(` <span class="fail">apply(%s):FAIL</span>`, label)
-			}
-			if mlr.PartialAcceptPass {
-				applyStatuses += fmt.Sprintf(` <span class="pass">partial(%s):pass</span>`, label)
-			} else {
-				applyStatuses += fmt.Sprintf(` <span class="fail">partial(%s):FAIL</span>`, label)
-			}
-		}
 
-		mlPass := allMaxLinesPass(f)
-		allPass := f.BatchPass && f.IncrementalPass && mlPass
+		allPass := f.BatchPass && f.IncrementalPass
 		escapedName := html.EscapeString(f.Name)
 		status := "passed"
 		if !allPass {
@@ -104,11 +79,11 @@ func generateReport(fixtures []fixtureResult, outputPath string) error {
 		if allPass && f.Verified {
 			openAttr = ""
 		}
-		fmt.Fprintf(&b, "<details class=\"fixture\" data-status=\"%s\"%s>\n<summary class=\"hdr\"><h2>%s</h2><button class=\"copy-btn\" data-name=\"%s\" onclick=\"navigator.clipboard.writeText(this.dataset.name)\">copy</button><span class=\"meta\">cursor=(%d,%d) vp=[%d,%d]</span><span class=\"hdr-statuses\">%s %s %s%s</span></summary>\n",
+		fmt.Fprintf(&b, "<details class=\"fixture\" data-status=\"%s\"%s>\n<summary class=\"hdr\"><h2>%s</h2><button class=\"copy-btn\" data-name=\"%s\" onclick=\"navigator.clipboard.writeText(this.dataset.name)\">copy</button><span class=\"meta\">cursor=(%d,%d) vp=[%d,%d]</span><span class=\"hdr-statuses\">%s %s %s</span></summary>\n",
 			status, openAttr, escapedName, escapedName,
 			f.Params.CursorRow, f.Params.CursorCol,
 			f.Params.ViewportTop, f.Params.ViewportBottom,
-			verifiedBadge, bStatus, iStatus, applyStatuses)
+			verifiedBadge, bStatus, iStatus)
 
 		var expectedStages []e2e.StageInfo
 		if !f.BatchPass || !f.IncrementalPass {
@@ -127,29 +102,6 @@ func generateReport(fixtures []fixtureResult, outputPath string) error {
 		e2e.RenderPipelineCol(&b, "Batch", f.OldText, f.NewText, batchStages, f.Params.CursorRow, f.Params.CursorCol, batchExpected)
 		e2e.RenderPipelineCol(&b, "Incremental", f.OldText, f.NewText, incStages, f.Params.CursorRow, f.Params.CursorCol, incExpected)
 		b.WriteString("</div>\n")
-
-		for _, mlr := range f.MaxLinesResults {
-			label := "default"
-			if mlr.MaxLines > 0 {
-				label = fmt.Sprintf("maxLines=%d", mlr.MaxLines)
-			}
-			if !mlr.ApplyPass && len(mlr.ApplyLines) > 0 {
-				b.WriteString("<div class=\"apply-section\">\n")
-				b.WriteString("<div class=\"cols-2\">\n")
-				e2e.RenderTextPane(&b, fmt.Sprintf("Applied %s (got)", label), mlr.ApplyLines, 0, -1)
-				e2e.RenderTextPane(&b, "Expected (new.txt)", strings.Split(f.NewText, "\n"), 0, -1, "pane-expected")
-				b.WriteString("</div>\n")
-				b.WriteString("</div>\n")
-			}
-			if !mlr.PartialAcceptPass && len(mlr.PartialAcceptLines) > 0 {
-				b.WriteString("<div class=\"apply-section\">\n")
-				b.WriteString("<div class=\"cols-2\">\n")
-				e2e.RenderTextPane(&b, fmt.Sprintf("Partial Accept %s (got)", label), mlr.PartialAcceptLines, 0, -1)
-				e2e.RenderTextPane(&b, "Expected (new.txt)", strings.Split(f.NewText, "\n"), 0, -1, "pane-expected")
-				b.WriteString("</div>\n")
-				b.WriteString("</div>\n")
-			}
-		}
 
 		renderJSONSection(&b, f.BatchActual, f.IncrementalActual, !allPass)
 

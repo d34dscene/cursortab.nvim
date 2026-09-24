@@ -55,13 +55,13 @@ func TestDiffEntryToUnifiedDiff(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			entry := &types.DiffEntry{Original: tt.original, Updated: tt.updated}
-			got := DiffEntryToUnifiedDiff(entry)
+			got := diffEntryToUnifiedDiff(entry)
 			assert.Equal(t, tt.want, got, "DiffEntryToUnifiedDiff result")
 		})
 	}
 }
 
-func TestFormatDiffHistory_Unified(t *testing.T) {
+func TestFormatDiffHistory(t *testing.T) {
 	history := []*types.FileDiffHistory{
 		{
 			FileName: "test.go",
@@ -71,34 +71,7 @@ func TestFormatDiffHistory_Unified(t *testing.T) {
 		},
 	}
 
-	result := FormatDiffHistory(history, DiffHistoryOptions{
-		HeaderTemplate: "User edited %q:\n",
-		Prefix:         "```diff\n",
-		Suffix:         "\n```",
-		Separator:      "\n\n",
-	})
-	assert.True(t, strings.Contains(result, "User edited \"test.go\""), "should have file name")
-	assert.True(t, strings.Contains(result, "```diff"), "should have diff block")
-	assert.True(t, strings.Contains(result, "-old line"), "should have removed line")
-	assert.True(t, strings.Contains(result, "+new line"), "should have added line")
-}
-
-func TestFormatDiffHistory_NoPrefix(t *testing.T) {
-	history := []*types.FileDiffHistory{
-		{
-			FileName: "test.go",
-			DiffHistory: []*types.DiffEntry{
-				{Original: "old line", Updated: "new line"},
-			},
-		},
-	}
-
-	result := FormatDiffHistory(history, DiffHistoryOptions{
-		HeaderTemplate: "<|file_sep|>%s.diff\n",
-		Prefix:         "",
-		Suffix:         "\n",
-		Separator:      "",
-	})
+	result := formatDiffHistory(history, "<|file_sep|>%s.diff\n")
 	assert.True(t, strings.Contains(result, "<|file_sep|>test.go.diff"), "should have file separator")
 	assert.True(t, strings.Contains(result, "-old line"), "should have removed line")
 	assert.True(t, strings.Contains(result, "+new line"), "should have added line")
@@ -118,7 +91,7 @@ func TestRejectEmpty(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, done := RejectEmptyText("test", tt.text)
+			_, done := rejectEmptyText("test", tt.text)
 
 			assert.Equal(t, tt.wantDone, done, "RejectEmpty done status")
 		})
@@ -237,7 +210,7 @@ func TestAnchorTruncation(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			state := stateForLines(oldLines, 1, 0)
-			_, endLineInc, _, done := AnchorTruncationText("test", state, tt.text, tt.finishReason, false, tt.threshold)
+			_, endLineInc, _, done := anchorTruncationText("test", state, tt.text, tt.finishReason, false, tt.threshold)
 
 			assert.Equal(t, tt.wantDone, done, "AnchorTruncation done status")
 			assert.Equal(t, tt.wantEndLine, endLineInc, "AnchorTruncation end line")
@@ -275,7 +248,7 @@ func TestValidateAnchorPosition(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			state := stateForLines(oldLines, 1, 0)
-			_, done := ValidateAnchorPositionText("test", state, tt.firstLine+"\nmore content", tt.maxAnchorRatio)
+			_, done := validateAnchorPositionText("test", state, tt.firstLine+"\nmore content", tt.maxAnchorRatio)
 
 			assert.Equal(t, tt.wantDone, done, "ValidateAnchorPosition done status")
 		})
@@ -313,7 +286,7 @@ func TestFirstLineAnchorChecker(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			ctx := stateForLines(oldLines, 1, 0)
 
-			checker := FirstLineAnchorChecker(tt.maxAnchorRatio)
+			checker := firstLineAnchorChecker(tt.maxAnchorRatio)
 			err := checker(ctx, tt.firstLine)
 
 			gotErr := err != nil
@@ -328,7 +301,7 @@ func TestFirstLineAnchorChecker_SmallFile(t *testing.T) {
 
 	ctx := stateForLines(oldLines, 1, 0)
 
-	checker := FirstLineAnchorChecker(0.25)
+	checker := firstLineAnchorChecker(0.25)
 	err := checker(ctx, "completely different")
 
 	// Should not error for small files

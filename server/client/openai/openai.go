@@ -18,44 +18,25 @@ type CompletionRequest struct {
 	Model       string   `json:"model"`
 	Prompt      string   `json:"prompt"`
 	Suffix      string   `json:"suffix,omitempty"`
-	Temperature float64  `json:"temperature"`
+	Temperature float64  `json:"temperature,omitempty"`
 	MaxTokens   int      `json:"max_tokens"`
-	TopK        int      `json:"top_k,omitempty"`
-	MinP        float64  `json:"min_p,omitempty"`
-	RepeatPen   float64  `json:"repeat_penalty,omitempty"`
 	Logprobs    int      `json:"logprobs,omitempty"`
 	Stop        []string `json:"stop,omitempty"`
-	N           int      `json:"n"`
-	Echo        bool     `json:"echo"`
+	CachePrompt bool     `json:"cache_prompt"`
 	Stream      bool     `json:"stream"`
 }
 
-// Logprobs holds per-token log probabilities for one completion choice. Both
-// the legacy completions shape (tokens + token_logprobs) and the content-item
-// shape (llama.cpp, OpenAI chat completions) decode into it.
+// Logprobs holds per-token log probabilities for one completion choice in
+// the legacy completions shape (tokens + token_logprobs).
 type Logprobs struct {
 	Tokens        []string  `json:"tokens"`
 	TokenLogprobs []float64 `json:"token_logprobs"`
-	Content       []Logprob `json:"content"`
-}
-
-// Logprob is one content-item entry.
-type Logprob struct {
-	Token   string  `json:"token"`
-	Logprob float64 `json:"logprob"`
 }
 
 // LogprobValues returns the per-token log probabilities, or nil when absent.
 func (l *Logprobs) LogprobValues() []float64 {
 	if l == nil {
 		return nil
-	}
-	if len(l.Content) > 0 {
-		values := make([]float64, len(l.Content))
-		for i, item := range l.Content {
-			values[i] = item.Logprob
-		}
-		return values
 	}
 	return l.TokenLogprobs
 }
@@ -446,6 +427,7 @@ func (c *Client) processLineStream(ctx context.Context, body io.Reader, lines ch
 func completionRequestWithStream(req *CompletionRequest, stream bool) *CompletionRequest {
 	cloned := *req
 	cloned.Stream = stream
+	cloned.CachePrompt = true
 	if req.Stop != nil {
 		cloned.Stop = append([]string(nil), req.Stop...)
 	}

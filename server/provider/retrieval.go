@@ -7,9 +7,9 @@ import (
 	"cursortab/types"
 )
 
-// RetrievalChunks returns the workspace code selected for this request, or nil
-// when retrieval is off or nothing matched.
-func RetrievalChunks(input sourcectx.CompletionInput) []types.RetrievalChunk {
+// retrievalChunks returns the workspace code selected for this request, or
+// nil when retrieval is off or nothing matched.
+func retrievalChunks(input sourcectx.CompletionInput) []types.RetrievalChunk {
 	material, ok := sourcectx.Find[sourcectx.Retrieval](input.Materials)
 	if !ok || material.Data == nil {
 		return nil
@@ -27,22 +27,22 @@ var bodylessKinds = map[string]bool{
 	"class": true,
 }
 
-// PromptForm returns the text a prompt should carry for a retrieved chunk.
-func PromptForm(c types.RetrievalChunk) string {
+// promptForm returns the text a prompt should carry for a retrieved chunk.
+func promptForm(c types.RetrievalChunk) string {
 	if bodylessKinds[c.Kind] {
 		return c.Signature
 	}
 	return c.Content
 }
 
-// RenderRetrievedPlain writes retrieved chunks as bare path headers. Used by
-// providers that have no FIM context tokens to hang file sections on.
-func RenderRetrievedPlain(b *strings.Builder, chunks []types.RetrievalChunk) {
+// renderRetrievedPlain writes retrieved chunks as bare path headers. Used by
+// dialects that have no FIM context tokens to hang file sections on.
+func renderRetrievedPlain(b *strings.Builder, chunks []types.RetrievalChunk) {
 	for _, chunk := range chunks {
 		b.WriteString("# ")
 		b.WriteString(chunk.Path)
 		b.WriteString("\n")
-		b.WriteString(PromptForm(chunk))
+		b.WriteString(promptForm(chunk))
 		b.WriteString("\n\n")
 	}
 }

@@ -343,6 +343,12 @@ func TestMakeRelativeToWorkspace(t *testing.T) {
 			workspacePath: "/home/user/project",
 			want:          "main.go",
 		},
+		{
+			name:          "scratch buffer stays empty",
+			absolutePath:  "",
+			workspacePath: "/home/user/project",
+			want:          "",
+		},
 	}
 
 	for _, tt := range tests {
@@ -448,4 +454,214 @@ func TestIsPureInsertion(t *testing.T) {
 
 	assert.False(t, isPureInsertion([]*text.Group{}), "empty groups")
 	assert.False(t, isPureInsertion(nil), "nil groups")
+}
+
+// --- Push-mirror tests: payloads in via pushEvent, applied via Sync ---
+
+func fullPayload(tick int64, path string, lines []any) map[string]any {
+	return map[string]any{
+		"tick": tick,
+		"path": path,
+		"row":  int64(1),
+		"col":  int64(0),
+		"full": map[string]any{"lines": lines},
+	}
+}
+
+func changedPayload(tick int64, path string, first, lastOld, lastNew int64, lines []any) map[string]any {
+	return map[string]any{
+		"tick":    tick,
+		"path":    path,
+		"row":     int64(1),
+		"col":     int64(0),
+		"changed": map[string]any{"first": first, "last_old": lastOld, "last_new": lastNew, "lines": lines},
+	}
+}
+
+func TestSync_AppliesFullPayload(t *testing.T) {
+	buf := New(Config{NsID: 1})
+	buf.pushEvent(fullPayload(42, "/w/src/main.go", []any{"a", "b"}))
+
+	result, err := buf.Sync("/w")
+
+	assert.NoError(t, err, "sync without client must not fail")
+	assert.True(t, result.BufferChanged, "first full payload with a path is a switch")
+	assert.Equal(t, "", result.OldPath, "old path empty before first payload")
+	assert.Equal(t, "src/main.go", result.NewPath, "path stored workspace-relative")
+	assert.Equal(t, 2, len(buf.Lines()), "mirror lines set")
+	assert.Equal(t, "a", buf.Lines()[0], "first line content")
+	assert.Equal(t, "src/main.go", buf.Path(), "path accessor")
+	assert.Equal(t, 1, buf.Row(), "row from payload")
+	assert.Equal(t, 0, buf.Col(), "col from payload")
+}
+
+func TestSync_AppliesChangedDeltasInOrder(t *testing.T) {
+	buf := New(Config{NsID: 1})
+	buf.pushEvent(fullPayload(5, "/w/a.go", []any{"a", "b", "c"}))
+	first, err := buf.Sync("/w")
+	assert.NoError(t, err, "sync must not fail")
+	assert.True(t, first.BufferChanged, "initial full reports the switch")
+
+	buf.pushEvent(changedPayload(6, "/w/a.go", 1, 1, 2, []any{"b2"})) // insert at index 1
+	buf.pushEvent(changedPayload(7, "/w/a.go", 0, 1, 1, []any{"A"}))  // replace index 0
+
+	result, err := buf.Sync("/w")
+
+	assert.NoError(t, err, "sync must not fail")
+	assert.False(t, result.BufferChanged, "same path throughout")
+	assert.Equal(t, 4, len(buf.Lines()), "both deltas applied")
+	assert.Equal(t, "A", buf.Lines()[0], "second delta result at head")
+	assert.Equal(t, "b2", buf.Lines()[1], "first delta insert survives")
+	assert.Equal(t, "b", buf.Lines()[2], "shifted original line")
+	assert.Equal(t, "c", buf.Lines()[3], "trailing line preserved")
+}
+
+func TestSync_SkipsNonContiguousDeltaUntilFull(t *testing.T) {
+	buf := New(Config{NsID: 1})
+	buf.pushEvent(fullPayload(5, "/w/a.go", []any{"a", "b"}))
+	_, _ = buf.Sync("/w")
+
+	buf.pushEvent(changedPayload(7, "/w/a.go", 0, 1, 1, []any{"WRONG"})) // tick gap: 6 skipped
+
+	result, err := buf.Sync("/w")
+
+	assert.NoError(t, err, "sync must not fail")
+	assert.False(t, result.BufferChanged, "path unchanged by a gap")
+	assert.Equal(t, 2, len(buf.Lines()), "gap delta not applied")
+	assert.Equal(t, "a", buf.Lines()[0], "mirror keeps last full content")
+
+	// Deltas stay blocked while the mirror is unsynced
+	buf.pushEvent(changedPayload(8, "/w/a.go", 0, 1, 1, []any{"STILL WRONG"}))
+	_, _ = buf.Sync("/w")
+	assert.Equal(t, "a", buf.Lines()[0], "blocked delta not applied")
+
+	// The resync full payload recovers
+	buf.pushEvent(fullPayload(9, "/w/a.go", []any{"fresh", "state"}))
+	_, _ = buf.Sync("/w")
+	assert.Equal(t, 2, len(buf.Lines()), "full payload applied")
+	assert.Equal(t, "fresh", buf.Lines()[0], "mirror recovered from resync")
+}
+
+func TestSync_IgnoresChangedBeforeFirstFull(t *testing.T) {
+	buf := New(Config{NsID: 1})
+	buf.pushEvent(changedPayload(1, "/w/a.go", 0, 0, 1, []any{"partial"}))
+
+	_, err := buf.Sync("/w")
+
+	assert.NoError(t, err, "sync must not fail")
+	assert.Equal(t, 0, len(buf.Lines()), "delta never applies to an unsynced mirror")
+}
+
+func TestSync_SkipsMalformedDelta(t *testing.T) {
+	buf := New(Config{NsID: 1})
+	buf.pushEvent(fullPayload(5, "/w/a.go", []any{"a", "b"}))
+	// last_new does not match first+len(lines)
+	buf.pushEvent(changedPayload(6, "/w/a.go", 0, 1, 9, []any{"x"}))
+
+	_, err := buf.Sync("/w")
+
+	assert.NoError(t, err, "sync must not fail")
+	assert.Equal(t, 2, len(buf.Lines()), "malformed delta not applied")
+	assert.Equal(t, "a", buf.Lines()[0], "mirror unchanged by malformed delta")
+
+	// Out-of-range old extent is also refused
+	buf.pushEvent(fullPayload(6, "/w/a.go", []any{"a", "b"}))
+	_, _ = buf.Sync("/w")
+	buf.pushEvent(changedPayload(7, "/w/a.go", 1, 5, 5, []any{"x"}))
+	_, _ = buf.Sync("/w")
+	assert.Equal(t, 2, len(buf.Lines()), "out-of-range delta not applied")
+	assert.Equal(t, "a", buf.Lines()[0], "mirror unchanged by out-of-range delta")
+}
+
+func TestSync_ReportsFileSwitchAndResetsMirror(t *testing.T) {
+	buf := New(Config{NsID: 1})
+	buf.pushEvent(fullPayload(3, "/w/a.go", []any{"a content"}))
+	_, _ = buf.Sync("/w")
+
+	buf.pushEvent(map[string]any{
+		"tick": float64(9),
+		"path": "/w/b.go",
+		"row":  float64(2),
+		"col":  float64(4),
+	})
+	result, err := buf.Sync("/w")
+
+	assert.NoError(t, err, "sync must not fail")
+	assert.True(t, result.BufferChanged, "path change is a file switch")
+	assert.Equal(t, "a.go", result.OldPath, "old path reported")
+	assert.Equal(t, "b.go", result.NewPath, "new path reported")
+	assert.Equal(t, 0, len(buf.Lines()), "mirror reset on switch")
+	assert.Equal(t, 2, buf.Row(), "cursor meta still applied on switch")
+
+	// Deltas for the new file stay blocked until its full payload arrives
+	buf.pushEvent(changedPayload(10, "/w/b.go", 0, 0, 1, []any{"sneaky"}))
+	result, _ = buf.Sync("/w")
+	assert.False(t, result.BufferChanged, "no further switch")
+	assert.Equal(t, 0, len(buf.Lines()), "delta blocked after switch")
+
+	buf.pushEvent(fullPayload(1, "/w/b.go", []any{"b one", "b two"}))
+	result, _ = buf.Sync("/w")
+	assert.False(t, result.BufferChanged, "full for same path is not a switch")
+	assert.Equal(t, 2, len(buf.Lines()), "new file content applied")
+	assert.Equal(t, "b one", buf.Lines()[0], "new file first line")
+}
+
+func TestSync_ScratchBufferHasNoSwitch(t *testing.T) {
+	buf := New(Config{NsID: 1})
+	buf.pushEvent(fullPayload(4, "", []any{"scratch"}))
+
+	result, err := buf.Sync("/w")
+
+	assert.NoError(t, err, "sync must not fail")
+	assert.False(t, result.BufferChanged, "empty path never registers as a switch")
+	assert.Equal(t, "", buf.Path(), "scratch path stays empty")
+}
+
+func TestSync_MetaFromNonTextEvent(t *testing.T) {
+	buf := New(Config{NsID: 1})
+	buf.pushEvent(fullPayload(5, "/w/a.go", []any{"a", "b"}))
+	_, _ = buf.Sync("/w")
+
+	buf.pushEvent(map[string]any{
+		"tick": float64(5),
+		"path": "/w/a.go",
+		"row":  float64(7),
+		"col":  float64(3),
+		"top":  float64(10),
+		"bot":  float64(40),
+	})
+	result, err := buf.Sync("/w")
+
+	assert.NoError(t, err, "sync must not fail")
+	assert.False(t, result.BufferChanged, "cursor event does not switch files")
+	assert.Equal(t, 7, buf.Row(), "row updated by meta event")
+	assert.Equal(t, 3, buf.Col(), "col updated by meta event")
+	top, bottom := buf.ViewportBounds()
+	assert.Equal(t, 10, top, "viewport top updated")
+	assert.Equal(t, 40, bottom, "viewport bottom updated")
+	assert.Equal(t, 2, len(buf.Lines()), "meta event never touches lines")
+
+	// Absent keys leave prior values alone
+	buf.pushEvent(map[string]any{"tick": int64(5), "row": int64(9)})
+	_, _ = buf.Sync("/w")
+	assert.Equal(t, 9, buf.Row(), "row updated when present")
+	assert.Equal(t, 3, buf.Col(), "col preserved when absent")
+}
+
+func TestSync_NumericPayloadVariants(t *testing.T) {
+	buf := New(Config{NsID: 1})
+	buf.pushEvent(map[string]any{
+		"tick": float64(2),
+		"path": "/w/a.go",
+		"row":  int64(4),
+		"col":  uint64(6),
+		"full": map[string]any{"lines": []any{"x"}},
+	})
+
+	_, err := buf.Sync("/w")
+
+	assert.NoError(t, err, "sync must not fail")
+	assert.Equal(t, 4, buf.Row(), "int64 row decoded")
+	assert.Equal(t, 6, buf.Col(), "uint64 col decoded")
+	assert.Equal(t, "x", buf.Lines()[0], "float64 tick accepted on full")
 }

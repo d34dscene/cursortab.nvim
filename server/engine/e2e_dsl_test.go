@@ -12,10 +12,6 @@
 //
 //	accept
 //
-//	prefetch <startLine>-<endLineInc> [cursor=<row>:<col>]
-//	  | "<completion line>"
-//	expect ...
-//
 // | lines are quoted with " and only " and \ are escaped.
 // cursor= on an action line sets the cursor before that step (setCursor).
 //
@@ -66,7 +62,7 @@ func ParseSteps(s string) ([]scenarioStep, error) {
 			continue
 		}
 
-		if strings.HasPrefix(line, "completion ") || strings.HasPrefix(line, "prefetch ") || strings.HasPrefix(line, "stash-prefetch ") {
+		if strings.HasPrefix(line, "completion ") {
 			step, newI, err := parseActionStep(lines, i)
 			if err != nil {
 				return nil, fmt.Errorf("line %d: %w", i+1, err)

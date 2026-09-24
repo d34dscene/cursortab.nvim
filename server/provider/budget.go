@@ -19,28 +19,28 @@ const (
 )
 
 // InputTokens returns the token budget for the whole prompt input: the
-// configured context window minus the generation reserve. context_size is the
-// model's total context window; 0 selects the conservative default.
+// configured context window minus the generation reserve. context_size is
+// the model's total context window; 0 selects the conservative default.
 func InputTokens(config *types.ProviderConfig) int {
 	if config == nil {
 		return 0
 	}
-	contextSize := config.ProviderContextSize
+	contextSize := config.ContextSize
 	if contextSize == 0 {
 		contextSize = defaultContextTokens
 	}
-	return max(contextSize-config.ProviderMaxTokens, 0)
+	return max(contextSize-config.Endpoint.MaxTokens, 0)
 }
 
-// MaterialsTokens returns the token budget for cross-file context materials.
-func MaterialsTokens(config *types.ProviderConfig) int {
+// materialsTokens returns the token budget for cross-file context materials.
+func materialsTokens(config *types.ProviderConfig) int {
 	return int(float64(InputTokens(config)) * maxMaterialsShare)
 }
 
-// WindowTokens returns the token budget for the current-file window after
+// windowTokens returns the token budget for the current-file window after
 // materials and prompt scaffolding take their share. Zero means unbounded
-// config (no trimming), matching the pre-budget behavior.
-func WindowTokens(config *types.ProviderConfig, contextChars int) int {
+// config (no trimming).
+func windowTokens(config *types.ProviderConfig, contextChars int) int {
 	input := InputTokens(config)
 	if input <= 0 {
 		return 0

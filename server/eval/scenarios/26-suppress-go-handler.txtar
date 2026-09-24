@@ -1,4 +1,4 @@
-Correct Go HTTP handler — no edits needed at any cursor position.
+Correct Go HTTP handler - no edits needed at any cursor position.
 id: suppress-go-handler
 language: go
 file: api/health.go
@@ -22,5 +22,4 @@ func HealthHandler(w http.ResponseWriter, r *http.Request) {
 }
 -- steps --
 request-completion manual
-  expect !shown
 

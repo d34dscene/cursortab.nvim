@@ -13,8 +13,7 @@ local M = {}
 
 ---RPC callback: called when completion is rejected
 function M.on_reject()
-	-- Clear awaiting flag in case we were waiting for a completion
-	events.clear_awaiting_completion()
+	events.clear_pending()
 	ui.close_all()
 end
 
@@ -33,15 +32,20 @@ end
 ---RPC callback: called when completion is ready
 ---@param diff_result DiffResult Completion diff result from Go daemon
 function M.on_completion_ready(diff_result)
-	-- Clear the awaiting flag now that we've received the completion
-	events.clear_awaiting_completion()
+	events.clear_pending()
 	ui.show_completion(diff_result)
 end
 
 ---RPC callback: called when cursor prediction is ready
 ---@param line_num integer Predicted line number (1-indexed)
 function M.on_cursor_prediction_ready(line_num)
+	events.clear_pending()
 	ui.show_cursor_prediction(line_num)
+end
+
+---RPC callback: Go asks for a full snapshot of the active buffer (§4 cursortab_resync)
+function M.on_resync()
+	events.resync()
 end
 
 -- Public API functions for users
@@ -106,36 +110,113 @@ function M.status()
 	vim.cmd("checkhealth cursortab")
 end
 
----Restart cursortab daemon
+---Restart cursortab daemon (never blocks the UI)
 function M.restart()
 	vim.notify("Restarting cursortab daemon...", vim.log.levels.INFO)
-
-	-- Clear any existing completions first
 	events.clear_all_completions()
-
-	-- Stop existing daemon (this now handles all cleanup reliably)
-	local _, stop_message = daemon.stop_daemon()
-	vim.notify(stop_message, vim.log.levels.INFO)
-
-	-- Small delay to ensure cleanup is complete
-	vim.defer_fn(function()
-		-- Explicitly start the daemon
-		local start_success = daemon.force_start()
-
-		if start_success then
+	daemon.stop_daemon(function()
+		if daemon.force_start() then
 			vim.notify("Cursortab daemon restarted successfully", vim.log.levels.INFO)
 		else
 			vim.notify("Failed to start cursortab daemon", vim.log.levels.ERROR)
 		end
-	end, 200)
+	end)
+end
+
+-- Role classification mirrors the server dialect table first-match order (mellum/qwen are type, sweep/zeta are edit)
+---@param id string
+---@return "type"|"edit"
+local function classify_model_role(id)
+	local s = id:lower()
+	if s:find("mellum", 1, true) or s:find("qwen", 1, true) then
+		return "type"
+	end
+	if s:find("sweep", 1, true) or s:find("zeta", 1, true) then
+		return "edit"
+	end
+	return "type"
+end
+
+---Probe {url}/v1/models, select models per role, store them, restart the daemon
+function M.model()
+	local cfg = config.get()
+	local args = { "curl", "-sS", "--max-time", "5", "-H", "Accept: application/json" }
+	local api_key = config.resolve_api_key()
+	if api_key ~= "" then
+		table.insert(args, "-H")
+		table.insert(args, "Authorization: Bearer " .. api_key)
+	end
+	table.insert(args, cfg.url .. "/v1/models")
+	vim.system(args, { text = true }, function(result)
+		vim.schedule(function()
+			M._handle_models(result)
+		end)
+	end)
+end
+
+---Handle the async probe result, store it for checkhealth and open the picker
+---@param result {code: integer, stdout: string, stderr: string}
+function M._handle_models(result)
+	local cfg = config.get()
+
+	local function fail(detail)
+		config.set_probe_result({ ok = false, count = 0, error = detail })
+		vim.notify("cursortab: model probe failed: " .. detail, vim.log.levels.ERROR)
+	end
+
+	if result.code ~= 0 then
+		fail(vim.trim(result.stderr ~= "" and result.stderr or ("curl exited with code " .. result.code)))
+		return
+	end
+
+	local ok, decoded = pcall(vim.json.decode, result.stdout or "")
+	local data = ok and type(decoded) == "table" and decoded.data or nil
+	if type(data) ~= "table" then
+		fail("invalid response from " .. cfg.url .. "/v1/models")
+		return
+	end
+
+	local items = {}
+	for _, entry in ipairs(data) do
+		local id = type(entry) == "table" and entry.id or nil
+		if type(id) == "string" and id ~= "" then
+			local role = classify_model_role(id)
+			table.insert(items, { role = role, id = id, label = "[" .. role .. "] " .. id })
+		end
+	end
+	if #items == 0 then
+		fail("no models returned by " .. cfg.url)
+		return
+	end
+
+	table.sort(items, function(a, b)
+		if a.role ~= b.role then
+			return a.role == "type"
+		end
+		return a.id < b.id
+	end)
+	config.set_probe_result({ ok = true, count = #items, error = "" })
+
+	vim.ui.select(items, {
+		prompt = "Cursortab models (" .. cfg.url .. ")",
+		format_item = function(item)
+			return item.label
+		end,
+	}, function(choice)
+		if not choice then
+			return
+		end
+		config.set_model(choice.role, choice.id)
+		vim.notify("cursortab: " .. choice.role .. " model set to " .. choice.id, vim.log.levels.INFO)
+		M.restart()
+	end)
 end
 
 ---Setup cursortab with user configuration
 ---@param user_config table|nil User configuration overrides
 function M.setup(user_config)
 	-- Setup configuration
-	local cfg = config.setup(user_config)
-	daemon.set_enabled(cfg.enabled)
+	config.setup(user_config)
 
 	-- Create user commands
 	vim.api.nvim_create_user_command("CursortabToggle", function()
@@ -157,6 +238,20 @@ function M.setup(user_config)
 	vim.api.nvim_create_user_command("CursortabRestart", function()
 		M.restart()
 	end, { desc = "Restart cursortab daemon" })
+
+	vim.api.nvim_create_user_command("Cursortab", function(cmd)
+		if cmd.args == "model" then
+			M.model()
+		else
+			vim.notify("Usage: :Cursortab model", vim.log.levels.INFO)
+		end
+	end, {
+		nargs = "?",
+		complete = function()
+			return { "model" }
+		end,
+		desc = "Cursortab subcommands (:Cursortab model)",
+	})
 
 	-- Setup highlight groups
 	config.setup_highlights()

@@ -14,10 +14,13 @@ import (
 	"cursortab/assert"
 	sourcectx "cursortab/ctx"
 	"cursortab/provider"
-	"cursortab/provider/fim"
 	"cursortab/types"
 	"cursortab/utils"
 )
+
+type transportSetter interface {
+	SetHTTPTransport(rt http.RoundTripper)
+}
 
 type liveBuffer struct{}
 
@@ -60,12 +63,14 @@ func TestLiveLlamacppPromptStaysUnderContextSize(t *testing.T) {
 		t.Skip("set LIVE_LLAMACPP=<base url> to run against a real llama.cpp server")
 	}
 	config := &types.ProviderConfig{
-		ProviderURL:         baseURL,
-		CompletionPath:      "/v1/completions",
-		ProviderModel:       "Qwen2.5-Coder-7B.Q8_0",
-		ProviderMaxTokens:   64,
-		ProviderContextSize: 8192,
-		ProviderTemperature: 0,
+		Endpoint: types.EndpointConfig{
+			URL:       baseURL,
+			Model:     "Qwen2.5-Coder-7B.Q8_0",
+			MaxTokens: 64,
+		},
+		CompletionPath: "/v1/completions",
+		ContextSize:    8192,
+		Temperature:    0,
 		FIMTokens: &types.FIMTokenConfig{
 			Prefix:   "<|fim_prefix|>",
 			Suffix:   "<|fim_suffix|>",
@@ -74,11 +79,12 @@ func TestLiveLlamacppPromptStaysUnderContextSize(t *testing.T) {
 			FileSep:  "<|file_sep|>",
 		},
 	}
-	prov := fim.NewProvider(config)
+	prov, err := provider.Build(provider.RoleType, "fim-qwen", config)
+	assert.NoError(t, err, "build fim-qwen provider")
 
 	var bodyLen int
 	var respPrefix string
-	prov.SetHTTPTransport(captureTransport{base: http.DefaultTransport, bodyLen: &bodyLen, respPrefix: &respPrefix})
+	prov.(transportSetter).SetHTTPTransport(captureTransport{base: http.DefaultTransport, bodyLen: &bodyLen, respPrefix: &respPrefix})
 
 	currentLines := make([]string, 2000)
 	for i := range currentLines {
@@ -112,13 +118,11 @@ func TestLiveLlamacppPromptStaysUnderContextSize(t *testing.T) {
 			MaxRecentSnapshots: 3,
 			MaxRecentFileBytes: 4096,
 			MaxDiffTokens:      512,
-			MaxUserActions:     16,
 			ContextChars:       prov.MaterialsBudgetChars(),
 		},
 	}
 
-	collected, used, err := sourcectx.Collect(context.Background(), sourceInput, prov.RequiredMaterials())
-	assert.NoError(t, err, "collect")
+	collected, used := sourcectx.Collect(context.Background(), sourceInput, prov.RequiredMaterials())
 	input := sourcectx.CompletionInput{Current: current, Materials: collected, ContextChars: used}
 
 	reqCtx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
@@ -128,7 +132,7 @@ func TestLiveLlamacppPromptStaysUnderContextSize(t *testing.T) {
 
 	var live liveResponse
 	assert.NoError(t, json.Unmarshal([]byte(respPrefix), &live), "parse live response")
-	assert.True(t, live.Usage.PromptTokens <= config.ProviderContextSize-config.ProviderMaxTokens,
+	assert.True(t, live.Usage.PromptTokens <= config.ContextSize-config.Endpoint.MaxTokens,
 		"server-tokenized prompt stays under the input budget")
 	assert.NotEqual(t, "", live.Choices[0].FinishReason, "server finished the request")
 

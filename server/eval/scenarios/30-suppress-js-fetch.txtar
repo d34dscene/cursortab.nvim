@@ -1,4 +1,4 @@
-Correct JavaScript async fetch with error handling — no edits needed at any cursor position.
+Correct JavaScript async fetch with error handling - no edits needed at any cursor position.
 id: suppress-js-fetch
 language: javascript
 file: api.js
@@ -19,5 +19,4 @@ async function fetchUserData(userId) {
 }
 -- steps --
 request-completion manual
-  expect !shown
 

@@ -27,7 +27,7 @@ var DefaultAllowedHeaders = map[string]bool{
 
 // DefaultSensitiveHeaders are still surfaced in cassettes (replaced with
 // <REDACTED>) so readers can see the server expected them. Dropping them
-// entirely would hide protocol-relevant info; leaking values would hide
+// entirely would hide protocol-relevant info. Leaking values would hide
 // credentials. Replacement is the middle ground.
 var DefaultSensitiveHeaders = map[string]bool{
 	"Authorization":   true,
@@ -132,8 +132,8 @@ func (r *Recorder) Reset() {
 }
 
 // snapshotHeaders applies a whitelist-first policy: only headers in
-// AllowedHeaders are captured verbatim; SensitiveHeaders are replaced with
-// <REDACTED>; anything else is dropped. This keeps committed cassettes
+// AllowedHeaders are captured verbatim. SensitiveHeaders are replaced with
+// <REDACTED>. Anything else is dropped. This keeps committed cassettes
 // robust against accidental future auth header leaks.
 func (r *Recorder) snapshotHeaders(h http.Header) map[string]string {
 	if !r.RecordHeaders {

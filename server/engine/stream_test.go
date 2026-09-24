@@ -1,10 +1,11 @@
 package engine
 
 import (
+	"testing"
+
 	"cursortab/assert"
 	"cursortab/text"
 	"cursortab/types"
-	"testing"
 )
 
 func TestStreamingKeepPartial_FullyTypedDoesNotCacheRejection(t *testing.T) {
@@ -26,15 +27,10 @@ func TestStreamingKeepPartial_FullyTypedDoesNotCacheRejection(t *testing.T) {
 		[]string{"hello "},
 		nil,
 	)
-	eng.display.setRejectionCandidate(&rejectedCompletion{
-		filePath:   buf.Path(),
-		startLine:  1,
-		endLineInc: 1,
-		beforeLine: "",
-		afterLine:  "",
-		oldLines:   []string{"hello"},
-		lines:      []string{"hello world"},
-	})
+	eng.display.rejectCandidate = &rejectedCompletion{
+		filePath:    buf.Path(),
+		contentHash: completionContentHash([]string{"hello world"}),
+	}
 	eng.streamLinesChan = make(chan string)
 
 	eng.doRejectStreamingAndDebounce()
@@ -78,7 +74,7 @@ func TestStreamCompleteAfterAccept_UsesCursorTargetOnlyResponse(t *testing.T) {
 	assert.Equal(t, 10, buf.showCursorTargetLine, "cursor target line")
 }
 
-func TestStreamCompleteAfterAccept_PreservesManualFlagThroughCachedPrefetch(t *testing.T) {
+func TestStreamCompleteAfterAccept_FarFinishShowsTarget(t *testing.T) {
 	buf := newMockBuffer()
 	buf.lines = []string{
 		"line 1", "line 2", "line 3", "line 4", "line 5",
@@ -103,11 +99,6 @@ func TestStreamCompleteAfterAccept_PreservesManualFlagThroughCachedPrefetch(t *t
 
 	assert.Equal(t, stateHasCursorTarget, eng.state, "far stream finish should first show cursor target")
 	assert.Equal(t, 10, buf.showCursorTargetLine, "cursor target line")
-
-	eng.acceptCursorTarget()
-
-	assert.NotNil(t, eng.currentSnapshot, "metrics snapshot")
-	assert.True(t, eng.currentSnapshot.ManuallyTriggered, "manual flag follows cached stream completion")
 }
 
 func TestRenderStreamedStage_SuppressedBeforeRender(t *testing.T) {
@@ -119,15 +110,10 @@ func TestRenderStreamedStage_SuppressedBeforeRender(t *testing.T) {
 	clock := newMockClock()
 	eng := createTestEngine(buf, prov, clock)
 
-	eng.display.setRejectionCandidate(&rejectedCompletion{
-		filePath:   buf.Path(),
-		startLine:  1,
-		endLineInc: 1,
-		beforeLine: "",
-		afterLine:  "",
-		oldLines:   []string{"hello"},
-		lines:      []string{"hello world"},
-	})
+	eng.display.rejectCandidate = &rejectedCompletion{
+		filePath:    buf.Path(),
+		contentHash: completionContentHash([]string{"hello world"}),
+	}
 	eng.rememberRejectedCompletion()
 
 	eng.state = stateStreamingCompletion
@@ -260,7 +246,6 @@ func TestStreamingAccept_FinalizedStageMismatch(t *testing.T) {
 					LineNumber:      6,
 					ShouldRetrigger: true,
 				},
-				IsLastStage: true,
 			},
 		},
 	}

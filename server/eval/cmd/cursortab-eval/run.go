@@ -25,10 +25,10 @@ func runCmd(args []string) error {
 	fs := flag.NewFlagSet("run", flag.ContinueOnError)
 	var (
 		dir          = fs.String("scenarios", "eval/scenarios", "directory of .txtar scenario fixtures")
-		filterFlag   = fs.String("targets", "", "comma-separated target names (filter; only runs targets the scenario already declares)")
+		filterFlag   = fs.String("targets", "", "comma-separated target names (filter, only runs targets the scenario already declares)")
 		strictModel  = fs.Bool("strict-model", true, "fail if cassette model_version doesn't match target model")
 		showPerScen  = fs.Bool("per-scenario", true, "include per-scenario breakdown in the quality report")
-		baselineFile = fs.String("baseline", "", "path to baseline JSON file; writes current metrics after each run")
+		baselineFile = fs.String("baseline", "", "path to baseline JSON file, writes current metrics after each run")
 		checkOnly    = fs.Bool("check", false, "compare against baseline without updating it (exit 1 if different)")
 	)
 	fs.SetOutput(os.Stderr)
@@ -71,7 +71,7 @@ func runCmd(args []string) error {
 	perTarget := make(map[string][]metrics.Score)
 	perScenario := []perScenarioScore{}
 	suppressStats := make(map[string]*suppressCount)
-	targetTypes := make(map[string]string)
+	targetDialects := make(map[string]string)
 
 	for i, sc := range scenarios {
 		isSuppress := len(sc.Expected) == 0
@@ -80,7 +80,7 @@ func runCmd(args []string) error {
 			if to.Skipped {
 				continue
 			}
-			targetTypes[to.Target.Name] = to.Target.Type
+			targetDialects[to.Target.Name] = to.Target.Dialect
 			if to.Error != nil {
 				fmt.Fprintf(os.Stderr, "[error] %s / %s: %v\n", sc.ID, to.Target.Name, to.Error)
 				continue
@@ -131,10 +131,10 @@ func runCmd(args []string) error {
 		}
 	}
 
-	renderQualityReport(perTarget, perScenario, suppressStats, targetTypes, *showPerScen)
+	renderQualityReport(perTarget, perScenario, suppressStats, targetDialects, *showPerScen)
 
 	if *baselineFile != "" {
-		cur := buildBaseline(perTarget, suppressStats, targetTypes)
+		cur := buildBaseline(perTarget, suppressStats, targetDialects)
 		old, err := loadBaseline(*baselineFile)
 		if err != nil {
 			return fmt.Errorf("load baseline: %w", err)

@@ -3,103 +3,49 @@ package harness
 import (
 	"fmt"
 	"net/http"
-	"strings"
 
 	"cursortab/engine"
-	"cursortab/eval/cassette"
 	"cursortab/provider"
 	_ "cursortab/provider/all"
-	"cursortab/provider/copilot"
-	"cursortab/provider/windsurf"
 	"cursortab/types"
 )
 
-// BuildProviderForTarget constructs a real provider for the given target,
-// wired with the given HTTP transport. baseCfg is merged on top of the
-// target's own Model/URL overrides.
-//
-// cs is only used by type=copilot (LSP replay). HTTP providers ignore it.
-// For copilot, if cs is non-nil, a new cassetteCopilotLSP is created;
-// otherwise the caller should pass in a pre-created one via the copilotLSP param.
-func BuildProviderForTarget(t Target, baseCfg *types.ProviderConfig, transport http.RoundTripper, cs *cassette.Cassette, copilotLSP *cassetteCopilotLSP) (engine.Provider, error) {
-	if t.Type == "" {
-		return nil, fmt.Errorf("harness: target %q has empty type", t.Name)
+// BuildProviderForTarget constructs a provider for the target's pinned
+// dialect, wired with the given HTTP transport for cassette record/replay.
+// baseCfg is merged on top of the target's own Model/URL overrides.
+func BuildProviderForTarget(t Target, baseCfg *types.ProviderConfig, transport http.RoundTripper) (engine.Provider, error) {
+	if t.Dialect == "" {
+		return nil, fmt.Errorf("harness: target %q has an empty dialect. The harness always pins one so prompts stay deterministic", t.Name)
 	}
 	cfg := mergeConfig(baseCfg, t)
+	applyRoleBudgets(t, cfg)
 
-	// Providers that need more than config are built here. Everything else
-	// goes through the shared registry so there is one place a provider is
-	// constructed, not one per consumer.
-	switch t.Type {
-	case "mercuryapi":
-		if t.URL != "" {
-			return nil, fmt.Errorf("harness: target %q has URL override but mercuryapi only supports the hosted endpoint", t.Name)
-		}
-	case "copilot":
-		if cs == nil {
-			return nil, fmt.Errorf("harness: target %q (copilot) requires a cassette; copilot cannot be recorded from the standalone harness", t.Name)
-		}
-		if copilotLSP == nil {
-			copilotLSP = newCassetteCopilotLSP(cs)
-		}
-		return copilot.NewProvider(copilotLSP), nil
-	case "windsurf":
-		p := windsurf.NewProvider(newCassetteWindsurfInfo())
-		p.SetHTTPTransport(transport)
-		return p, nil
-	case "fim":
-		applyFIMDefaults(cfg)
-	}
-
-	prov, err := provider.Build(t.Type, cfg)
+	prov, err := provider.Build(t.Role, t.Dialect, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("harness: target %q: %w", t.Name, err)
 	}
-	provider.SetTransport(prov, transport)
+	if transport != nil {
+		setter, ok := prov.(interface{ SetHTTPTransport(http.RoundTripper) })
+		if !ok {
+			return nil, fmt.Errorf("harness: target %q: dialect %s does not support a transport override", t.Name, t.Dialect)
+		}
+		setter.SetHTTPTransport(transport)
+	}
 	return prov, nil
 }
 
-// applyFIMDefaults fills in the token layout and generation budget the eval
-// runs rely on, keyed off the model name.
-func applyFIMDefaults(cfg *types.ProviderConfig) {
-	if cfg.ProviderContextSize == 0 {
-		cfg.ProviderContextSize = 1024
+// applyRoleBudgets keeps eval runs deterministic: a small fixed context and
+// bounded FIM generations, the same budget the dialect presets expect.
+// FIM token layout itself comes from the pinned dialect, not model names.
+func applyRoleBudgets(t Target, cfg *types.ProviderConfig) {
+	if t.Role != provider.RoleType {
+		return
 	}
-	if cfg.ProviderMaxTokens == 0 || cfg.ProviderMaxTokens > 128 {
-		cfg.ProviderMaxTokens = 128
+	if cfg.ContextSize == 0 {
+		cfg.ContextSize = 1024
 	}
-	// Qwen models (and Zeta, which is Qwen-based) use the standard FIM
-	// tokens; inject them when targets haven't configured FIMTokens. Without
-	// this, eval FIM falls back to prompt+suffix mode and Qwen completions
-	// regress.
-	isQwen := strings.Contains(strings.ToLower(cfg.ProviderModel), "qwen")
-	if cfg.FIMTokens == nil && isQwen {
-		cfg.FIMTokens = &types.FIMTokenConfig{
-			Prefix: "<|fim_prefix|>",
-			Suffix: "<|fim_suffix|>",
-			Middle: "<|fim_middle|>",
-		}
-	}
-	// Qwen also supports repo-level cross-file context.
-	if cfg.FIMTokens != nil && isQwen {
-		if cfg.FIMTokens.RepoName == "" {
-			cfg.FIMTokens.RepoName = "<|repo_name|>"
-		}
-		if cfg.FIMTokens.FileSep == "" {
-			cfg.FIMTokens.FileSep = "<|file_sep|>"
-		}
-	}
-	// Mellum uses suffix-first token order and filename-tagged cross-file
-	// context (JetBrains card format).
-	isMellum := strings.Contains(strings.ToLower(cfg.ProviderModel), "mellum")
-	if cfg.FIMTokens == nil && isMellum {
-		cfg.FIMTokens = &types.FIMTokenConfig{
-			Prefix:      "<fim_prefix>",
-			Suffix:      "<fim_suffix>",
-			Middle:      "<fim_middle>",
-			Filename:    "<filename>",
-			SuffixFirst: true,
-		}
+	if cfg.Endpoint.MaxTokens == 0 || cfg.Endpoint.MaxTokens > 128 {
+		cfg.Endpoint.MaxTokens = 128
 	}
 }
 
@@ -110,22 +56,22 @@ func mergeConfig(base *types.ProviderConfig, t Target) *types.ProviderConfig {
 		*out = *base
 	}
 	if t.URL != "" {
-		out.ProviderURL = t.URL
+		out.Endpoint.URL = t.URL
 	}
 	if t.Model != "" {
-		out.ProviderModel = t.Model
+		out.Endpoint.Model = t.Model
 	}
 	if out.CompletionPath == "" {
 		out.CompletionPath = "/v1/completions"
 	}
-	if out.ProviderMaxTokens == 0 {
-		out.ProviderMaxTokens = 2048
+	if out.Endpoint.MaxTokens == 0 {
+		out.Endpoint.MaxTokens = 2048
 	}
-	if out.CompletionTimeout == 0 {
-		out.CompletionTimeout = 30_000
+	if out.Endpoint.TimeoutMs == 0 {
+		out.Endpoint.TimeoutMs = 30_000
 	}
-	if out.APIKey == "" {
-		out.APIKey = "eval-placeholder"
+	if out.Endpoint.APIKey == "" {
+		out.Endpoint.APIKey = "eval-placeholder"
 	}
 	return out
 }

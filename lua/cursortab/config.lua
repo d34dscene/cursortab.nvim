@@ -33,30 +33,25 @@
 ---@field prefix string FIM prefix token (e.g., "<|fim_prefix|>")
 ---@field suffix string FIM suffix token (e.g., "<|fim_suffix|>")
 ---@field middle string FIM middle token (e.g., "<|fim_middle|>")
----@field repo_name string Optional repo-level FIM token (e.g., "<|repo_name|>"); enables cross-file context
----@field file_sep string Optional file separator token (e.g., "<|file_sep|>"); enables cross-file context
----@field suffix_first boolean Optional; emit suffix content before prefix content (Mellum, SeedCoder style)
+---@field repo_name string Optional repo-level FIM token (e.g., "<|repo_name|>")
+---@field file_sep string Optional file separator token (e.g., "<|file_sep|>")
+---@field filename string Optional filename token (e.g., "<filename>")
+---@field suffix_first boolean Emit suffix content before prefix content (Mellum, SeedCoder style)
 
----@class CursortabProviderConfig
----@field type string
----@field url string
----@field api_key_env string|nil Environment variable name containing the API key (e.g., "OPENAI_API_KEY")
----@field model string
----@field temperature number
----@field context_size integer Model context window in tokens. The total prompt (cross-file context plus current file) stays under it, with max_tokens reserved for generation. 0 = conservative default (1024 input tokens)
----@field max_tokens integer Max tokens to generate
----@field top_k integer
----@field min_p number Min-p sampling threshold, llama.cpp only (0 = server default)
----@field repeat_penalty number Repetition penalty, llama.cpp only (0 = server default)
----@field completion_timeout integer
----@field max_diff_history_tokens integer
----@field completion_path string API endpoint path (e.g., "/v1/completions")
----@field fim_tokens CursortabFIMTokensConfig|string|nil FIM tokens configuration, a preset name ("mellum"), or nil
----@field retrieval_enabled boolean Include workspace declarations that match the cursor in the prompt
----@field retrieval_max_chunks integer Max retrieved code chunks per prompt (0 = default 8)
+---@class CursortabMaxTokensConfig
+---@field type integer Generation cap for the type model (0 = role default)
+---@field edit integer Generation cap for the edit model (0 = role default)
+
+---@class CursortabNextEditConfig
+---@field model string Type model id for pause-time next-edit ("auto" picks via probe)
+
+---@class CursortabQualityConfig
 ---@field logprobs boolean Request token logprobs and gate completions on their confidence
----@field min_confidence number Drop completions with mean token logprob below this (0 = off)
----@field privacy_mode boolean Enable privacy mode (don't send telemetry to provider)
+---@field min_confidence number Drop completions with mean token logprob below this (must be <= 0, 0 = off)
+
+---@class CursortabRetrievalConfig
+---@field enabled boolean Include workspace declarations that match the cursor in the prompt
+---@field max_chunks integer Max retrieved code chunks per prompt (0 = default)
 
 ---@class CursortabDebugConfig
 ---@field immediate_shutdown boolean
@@ -66,78 +61,77 @@
 ---@field partial_accept string|false Partial accept keymap (e.g., "<S-Tab>"), or false to disable
 ---@field trigger string|false Trigger completion keymap (e.g., "<C-Space>"), or false to disable
 
----@class CursortabBlinkConfig
----@field enabled boolean
----@field ghost_text boolean
-
----@class CursortabNextEditConfig
----@field enabled boolean
----@field type string Edit-prediction provider: "zeta-2.1", "zeta-2", "zeta", or "sweep"
----@field model string Model id (empty = use provider model)
----@field url string Provider URL override (empty = use provider.url)
----@field idle_delay integer Ms of no typing before the next-edit model is consulted
+---@class CursortabProbeResult
+---@field ok boolean
+---@field count integer Number of models returned
+---@field error string Failure detail when ok is false
 
 ---@class CursortabConfig
----@field enabled boolean
+---@field url string Server base URL
+---@field model string Type model id ("auto" picks via probe + family table)
+---@field api_key_env string Environment variable holding the API key ("" = none)
+---@field next_edit CursortabNextEditConfig|false|nil nil/false disables dual mode
+---@field max_tokens CursortabMaxTokensConfig|nil Optional generation caps per role
+---@field context_size integer|nil Optional context window override (nil = probe)
+---@field fim_tokens CursortabFIMTokensConfig|nil Advanced: explicit FIM tokens for exotic models
+---@field quality CursortabQualityConfig
+---@field retrieval CursortabRetrievalConfig
 ---@field log_level string
 ---@field state_dir string Directory for runtime files (log, socket, pid)
 ---@field keymaps CursortabKeymapsConfig
 ---@field ui CursortabUIConfig
 ---@field behavior CursortabBehaviorConfig
----@field contribute_data boolean Opt-in: send anonymous completion metrics to the public dataset for model training
----@field trace_enabled boolean Record local completion session traces (JSONL) for offline evaluation
----@field provider CursortabProviderConfig
----@field next_edit CursortabNextEditConfig
----@field blink CursortabBlinkConfig
 ---@field debug CursortabDebugConfig
 
 -- Default configuration
 ---@type CursortabConfig
 local default_config = {
-	enabled = true,
+	url = "http://localhost:8000",
+	model = "auto",
+	api_key_env = "",
 	log_level = "info",
 	state_dir = vim.fn.stdpath("state") .. "/cursortab",
-	contribute_data = false, -- Opt-in: send anonymous metrics to train a better gating model
-	trace_enabled = false, -- Record local completion session traces for offline evaluation
 
 	keymaps = {
-		accept = "<Tab>", -- Keymap to accept completion, or false to disable
-		partial_accept = "<S-Tab>", -- Keymap to partially accept completion, or false to disable
-		trigger = false, -- Keymap to manually trigger completion, or false to disable (default: false)
+		accept = "<Tab>",
+		partial_accept = "<S-Tab>",
+		trigger = false,
 	},
 
 	ui = {
 		completions = {
-			addition_style = "dimmed", -- "dimmed" or "highlight"
-			fg_opacity = 0.6, -- opacity for completion overlays (0=invisible, 1=fully visible)
+			addition_style = "dimmed",
+			fg_opacity = 0.6,
 		},
 		jump = {
-			symbol = "",
+			symbol = "",
 			text = " TAB ",
 			show_distance = true,
 		},
 	},
 
-	next_edit = {
-		enabled = false, -- Ask a second edit-prediction model while you pause with a completion displayed
-		type = "zeta-2.1", -- "zeta-2.1", "zeta-2", "zeta", or "sweep"
-		model = "", -- Model id (empty = provider.model)
-		url = "", -- Provider URL override (empty = provider.url)
-		idle_delay = 500, -- Ms of no typing before consulting the next-edit model
+	quality = {
+		logprobs = false,
+		min_confidence = 0.0,
+	},
+
+	retrieval = {
+		enabled = false,
+		max_chunks = 0,
 	},
 
 	behavior = {
-		idle_completion_delay = 50, -- Delay in ms after being idle in normal mode to trigger completion (-1 to disable)
-		text_change_debounce = 50, -- Debounce in ms after text changed to trigger completion
-		max_visible_lines = 12, -- Max visible lines per completion (0 to disable)
+		idle_completion_delay = 400,
+		text_change_debounce = 35,
+		max_visible_lines = 12,
 		cursor_prediction = {
-			enabled = true, -- Show jump indicators after completions
-			auto_advance = true, -- When completion has no changes, show cursor jump to last line
-			proximity_threshold = 2, -- Min lines apart to show cursor jump between completions (0 to disable)
+			enabled = true,
+			auto_advance = true,
+			proximity_threshold = 3,
 		},
-		disabled_in = {}, -- Tree-sitter scopes where completions are suppressed (e.g., "comment", "string")
-		enabled_modes = { "insert", "normal" }, -- Modes where completions are active
-		ignore_paths = { -- Glob patterns for files to skip completions
+		disabled_in = {},
+		enabled_modes = { "insert", "normal" },
+		ignore_paths = {
 			"*.min.js",
 			"*.min.css",
 			"*.map",
@@ -156,389 +150,180 @@ local default_config = {
 			".env.*",
 			"*.log",
 		},
-		ignore_filetypes = { "", "terminal" }, -- Filetypes to skip completions
-		ignore_gitignored = true, -- Skip files matched by .gitignore
-	},
- 
-	provider = {
-		type = "inline", -- "inline", "fim", "sweep", "zeta-2.1", "zeta-2", "zeta", "copilot", "windsurf", or "mercuryapi"
-		url = "http://localhost:8000", -- URL of the provider server
-		api_key_env = "", -- Environment variable name for API key (e.g., "OPENAI_API_KEY")
-		model = "", -- Model name
-		temperature = 0.0, -- Sampling temperature
-		context_size = 0, -- Model context window in tokens; total prompt stays under it (0 = conservative default)
-		max_tokens = 512, -- Max tokens to generate, reserved from context_size
-		top_k = 50, -- Top-k sampling
-		min_p = 0.0, -- Min-p sampling threshold (0 = server default)
-		repeat_penalty = 0.0, -- Repetition penalty (0 = server default)
-		completion_timeout = 5000, -- Timeout in ms for completion requests
-		max_diff_history_tokens = 512, -- Max tokens for diff history across all files (0 = no limit)
-		completion_path = "/v1/completions", -- API endpoint path
-		-- fim_tokens is optional. Omit (the default) to use OpenAI prompt+suffix
-		-- format (e.g. DeepSeek). Set it to opt into tokenized FIM, either as a
-		-- preset name (fim_tokens = "mellum") or a full table:
-		--   fim_tokens = {
-		--     prefix = "<|fim_prefix|>",
-		--     suffix = "<|fim_suffix|>",
-		--     middle = "<|fim_middle|>",
-		--     repo_name = "<|repo_name|>", -- optional; auto-detected for Qwen
-		--     file_sep = "<|file_sep|>",   -- optional; auto-detected for Qwen
-		--   }
-		retrieval_enabled = false, -- Include workspace declarations matching the cursor in the prompt
-		retrieval_max_chunks = 0, -- Max retrieved code chunks per prompt (0 = default 8)
-		logprobs = false, -- Request token logprobs and gate completions on their confidence
-		min_confidence = 0.0, -- Drop completions with mean token logprob below this; must be <= 0 (0 = off)
-		privacy_mode = true, -- Don't send telemetry to provider
-	},
-
-	blink = {
-		enabled = false,
-		ghost_text = true,
+		ignore_filetypes = { "", "terminal" },
+		ignore_gitignored = true,
 	},
 
 	debug = {
-		immediate_shutdown = false, -- Shutdown daemon immediately when no clients are connected
+		immediate_shutdown = false,
 	},
 }
 
--- Deprecated field mappings (old flat field -> new nested path)
--- A nil value means the option was removed entirely
--- Example: old_field = { "new", "nested", "path" }
--- Example: removed_field = nil
-local deprecated_mappings = {}
-
--- Nested field renames (old nested field -> new field name within same parent)
--- Format: { path = { "path", "to", "parent" }, old = "old_field", new = "new_field" }
--- Example: { path = { "behavior", "cursor_prediction" }, old = "dist_threshold", new = "proximity_threshold" }
-local nested_field_renames = {}
-
--- Migrate deprecated flat config to new nested structure
----@param user_config table
----@return table
-local function migrate_deprecated_config(user_config)
-	local migrated = vim.deepcopy(user_config)
-	local deprecated_keys = {}
-	local removed_keys = {}
-
-	for old_key, new_path in pairs(deprecated_mappings) do
-		if migrated[old_key] ~= nil then
-			-- Skip if key exists in new format (e.g., provider = { type = ... } is new, provider = "inline" is old)
-			-- When new_path[1] == old_key, the new format uses a table at that key
-			if new_path and new_path[1] == old_key and type(migrated[old_key]) == "table" then
-				goto continue
-			end
-
-			if new_path == nil then
-				-- Option was removed entirely
-				table.insert(removed_keys, old_key)
-			else
-				-- Option was moved to new location
-				table.insert(deprecated_keys, old_key)
-				-- Navigate to the nested location and set the value
-				local target = migrated
-				for i = 1, #new_path - 1 do
-					local key = new_path[i]
-					-- Create table if nil or if it's not a table (e.g., old "provider" string)
-					if target[key] == nil or type(target[key]) ~= "table" then
-						target[key] = {}
-					end
-					target = target[key]
-				end
-				target[new_path[#new_path]] = migrated[old_key]
-			end
-			migrated[old_key] = nil
-
-			::continue::
-		end
-	end
-
-	if #deprecated_keys > 0 then
-		vim.schedule(function()
-			vim.notify(
-				"[cursortab.nvim] Deprecated config keys detected: "
-					.. table.concat(deprecated_keys, ", ")
-					.. "\nPlease migrate to the new nested structure. See :help cursortab-config",
-				vim.log.levels.WARN
-			)
-		end)
-	end
-
-	if #removed_keys > 0 then
-		vim.schedule(function()
-			vim.notify(
-				"[cursortab.nvim] Removed config keys detected: "
-					.. table.concat(removed_keys, ", ")
-					.. "\nThese options no longer have any effect.",
-				vim.log.levels.WARN
-			)
-		end)
-	end
-
-	-- Handle nested field renames
-	local renamed_fields = {}
-	for _, rename in ipairs(nested_field_renames) do
-		-- Navigate to the parent table
-		local parent = migrated
-		local found = true
-		for _, key in ipairs(rename.path) do
-			if parent[key] == nil or type(parent[key]) ~= "table" then
-				found = false
-				break
-			end
-			parent = parent[key]
-		end
-
-		-- If parent exists and has the old field, rename it
-		if found and parent[rename.old] ~= nil then
-			parent[rename.new] = parent[rename.old]
-			parent[rename.old] = nil
-			table.insert(renamed_fields, rename.old .. " -> " .. rename.new)
-		end
-	end
-
-	if #renamed_fields > 0 then
-		vim.schedule(function()
-			vim.notify(
-				"[cursortab.nvim] Renamed config fields detected: "
-					.. table.concat(renamed_fields, ", ")
-					.. "\nPlease update your config. See :help cursortab-config",
-				vim.log.levels.WARN
-			)
-		end)
-	end
-
-	return migrated
-end
-
--- Valid values for enum-like config options
-local valid_provider_types = {
-	inline = true,
-	fim = true,
-	sweep = true,
-	["zeta-2.1"] = true,
-	["zeta-2"] = true,
-	zeta = true,
-	copilot = true,
-	windsurf = true,
-	mercuryapi = true,
+-- Templates for documented optional keys that stay nil in default_config, so the key validator can see inside them
+local optional_templates = {
+	next_edit = { model = "auto" },
+	max_tokens = { type = 0, edit = 0 },
+	context_size = 0,
+	fim_tokens = { prefix = "", suffix = "", middle = "", repo_name = "", file_sep = "", filename = "", suffix_first = false },
 }
+
 local valid_log_levels = { trace = true, debug = true, info = true, warn = true, error = true }
 local valid_addition_styles = { dimmed = true, highlight = true }
+local valid_modes = { insert = true, normal = true }
 
--- Known FIM token layouts. Lets users write fim_tokens = "mellum" instead of
--- spelling out every token. Values are resolved into fim_tokens tables during
--- setup, before validation and the daemon config JSON are built.
-local fim_presets = {
-	mellum = {
-		prefix = "<fim_prefix>",
-		suffix = "<fim_suffix>",
-		middle = "<fim_middle>",
-		filename = "<filename>",
-		suffix_first = true,
-	},
-}
+---@type CursortabProbeResult|nil
+local last_probe = nil
 
--- Documented optional keys that stay nil in default_config, so the default-key
--- validator would otherwise reject them.
-local optional_provider_keys = { fim_tokens = true }
+local function type_error(name, expected, value)
+	error(string.format("[cursortab.nvim] %s must be %s (got %s)", name, expected, type(value)))
+end
 
--- Validate that all keys in user config exist in default config
----@param user_cfg table User configuration
----@param default_cfg table Default configuration
----@param path string Current path for error messages
+local function check_type(value, expected, name)
+	if type(value) ~= expected then
+		type_error(name, expected, value)
+	end
+end
+
+local function check_string_list(value, name)
+	check_type(value, "table", name)
+	for i, item in ipairs(value) do
+		if type(item) ~= "string" then
+			error(string.format("[cursortab.nvim] %s[%d] must be a string", name, i))
+		end
+	end
+end
+
+-- Validate that all keys exist in the (template-merged) defaults
+---@param user_cfg table
+---@param default_cfg table
+---@param path string
 local function validate_config_keys(user_cfg, default_cfg, path)
 	for key, value in pairs(user_cfg) do
-		if default_cfg[key] == nil and not (path == "provider." and optional_provider_keys[key]) then
+		if default_cfg[key] == nil then
 			error(string.format("[cursortab.nvim] Unknown config option: %s%s", path, key))
 		end
-		-- Recursively validate nested tables (skip lists with numeric keys)
 		if type(value) == "table" and type(default_cfg[key]) == "table" and next(value) ~= nil and type(next(value)) ~= "number" then
 			validate_config_keys(value, default_cfg[key], path .. key .. ".")
 		end
 	end
 end
 
--- Validate configuration values
----@param cfg table
-local function validate_config(cfg)
-	-- First, validate that all keys are recognized
-	validate_config_keys(cfg, default_config, "")
-	-- Validate keymaps.accept (must be string or false)
-	if cfg.keymaps and cfg.keymaps.accept ~= nil then
-		local accept = cfg.keymaps.accept
-		if accept ~= false and type(accept) ~= "string" then
-			error("[cursortab.nvim] keymaps.accept must be a string (keymap) or false to disable")
-		end
-		if type(accept) == "string" and accept == "" then
-			error("[cursortab.nvim] keymaps.accept cannot be an empty string (use false to disable)")
+local function validate_keymap(value, name)
+	if value == nil then
+		return
+	end
+	if value ~= false and type(value) ~= "string" then
+		error(string.format("[cursortab.nvim] %s must be a string (keymap) or false to disable", name))
+	end
+	if value == "" then
+		error(string.format("[cursortab.nvim] %s cannot be an empty string (use false to disable)", name))
+	end
+end
+
+-- Validate configuration values: types and enums only.
+-- Numeric ranges are validated by the Go daemon at startup.
+---@param cfg table Merged configuration
+local function validate_values(cfg)
+	check_type(cfg.url, "string", "url")
+	if cfg.url == "" then
+		error("[cursortab.nvim] url is required")
+	end
+	check_type(cfg.model, "string", "model")
+	check_type(cfg.api_key_env, "string", "api_key_env")
+	check_type(cfg.log_level, "string", "log_level")
+	if not valid_log_levels[cfg.log_level] then
+		error(string.format("[cursortab.nvim] Invalid log_level '%s'. Must be one of: trace, debug, info, warn, error", cfg.log_level))
+	end
+	check_type(cfg.state_dir, "string", "state_dir")
+
+	validate_keymap(cfg.keymaps.accept, "keymaps.accept")
+	validate_keymap(cfg.keymaps.partial_accept, "keymaps.partial_accept")
+	validate_keymap(cfg.keymaps.trigger, "keymaps.trigger")
+
+	if cfg.next_edit ~= nil and cfg.next_edit ~= false then
+		check_type(cfg.next_edit, "table", "next_edit")
+		if cfg.next_edit.model ~= nil then
+			check_type(cfg.next_edit.model, "string", "next_edit.model")
 		end
 	end
 
-	-- Validate provider type
-	if cfg.provider and cfg.provider.type then
-		if not valid_provider_types[cfg.provider.type] then
-			error(string.format(
-				"[cursortab.nvim] Invalid provider.type '%s'. Must be one of: inline, fim, sweep, zeta-2.1, zeta-2, zeta, copilot, windsurf, mercuryapi",
-				cfg.provider.type
-			))
+	if cfg.max_tokens ~= nil then
+		check_type(cfg.max_tokens, "table", "max_tokens")
+		if cfg.max_tokens.type ~= nil then
+			check_type(cfg.max_tokens.type, "number", "max_tokens.type")
+		end
+		if cfg.max_tokens.edit ~= nil then
+			check_type(cfg.max_tokens.edit, "number", "max_tokens.edit")
 		end
 	end
 
-	-- Validate log level
-	if cfg.log_level and not valid_log_levels[cfg.log_level] then
+	if cfg.context_size ~= nil then
+		check_type(cfg.context_size, "number", "context_size")
+	end
+
+	if cfg.fim_tokens ~= nil then
+		check_type(cfg.fim_tokens, "table", "fim_tokens (preset names are gone, pass a token table)")
+		for _, field in ipairs({ "prefix", "suffix", "middle" }) do
+			local value = cfg.fim_tokens[field]
+			if value == nil or type(value) ~= "string" or value == "" then
+				error(string.format("[cursortab.nvim] fim_tokens.%s is required and must be a non-empty string", field))
+			end
+		end
+		for _, field in ipairs({ "repo_name", "file_sep", "filename" }) do
+			if cfg.fim_tokens[field] ~= nil then
+				check_type(cfg.fim_tokens[field], "string", "fim_tokens." .. field)
+			end
+		end
+		if cfg.fim_tokens.suffix_first ~= nil then
+			check_type(cfg.fim_tokens.suffix_first, "boolean", "fim_tokens.suffix_first")
+		end
+	end
+
+	check_type(cfg.quality.logprobs, "boolean", "quality.logprobs")
+	check_type(cfg.quality.min_confidence, "number", "quality.min_confidence")
+
+	check_type(cfg.retrieval.enabled, "boolean", "retrieval.enabled")
+	check_type(cfg.retrieval.max_chunks, "number", "retrieval.max_chunks")
+
+	check_type(cfg.ui.completions.addition_style, "string", "ui.completions.addition_style")
+	if not valid_addition_styles[cfg.ui.completions.addition_style] then
 		error(string.format(
-			"[cursortab.nvim] Invalid log_level '%s'. Must be one of: trace, debug, info, warn, error",
-			cfg.log_level
+			"[cursortab.nvim] Invalid ui.completions.addition_style '%s'. Must be one of: dimmed, highlight",
+			cfg.ui.completions.addition_style
 		))
 	end
+	local f = cfg.ui.completions.fg_opacity
+	if type(f) ~= "number" or f < 0 or f > 1 then
+		error("[cursortab.nvim] ui.completions.fg_opacity must be a number between 0 and 1")
+	end
+	check_type(cfg.ui.jump.symbol, "string", "ui.jump.symbol")
+	check_type(cfg.ui.jump.text, "string", "ui.jump.text")
+	check_type(cfg.ui.jump.show_distance, "boolean", "ui.jump.show_distance")
 
-	-- Validate addition style
-	if cfg.ui and cfg.ui.completions and cfg.ui.completions.addition_style then
-		if not valid_addition_styles[cfg.ui.completions.addition_style] then
+	check_type(cfg.behavior.idle_completion_delay, "number", "behavior.idle_completion_delay")
+	check_type(cfg.behavior.text_change_debounce, "number", "behavior.text_change_debounce")
+	check_type(cfg.behavior.max_visible_lines, "number", "behavior.max_visible_lines")
+	check_type(cfg.behavior.disabled_in, "table", "behavior.disabled_in")
+	check_string_list(cfg.behavior.ignore_paths, "behavior.ignore_paths")
+	check_string_list(cfg.behavior.ignore_filetypes, "behavior.ignore_filetypes")
+	check_type(cfg.behavior.ignore_gitignored, "boolean", "behavior.ignore_gitignored")
+	check_type(cfg.behavior.enabled_modes, "table", "behavior.enabled_modes")
+	for i, mode in ipairs(cfg.behavior.enabled_modes) do
+		if type(mode) ~= "string" or not valid_modes[mode] then
 			error(string.format(
-				"[cursortab.nvim] Invalid ui.completions.addition_style '%s'. Must be one of: dimmed, highlight",
-				cfg.ui.completions.addition_style
+				"[cursortab.nvim] behavior.enabled_modes[%d] = %q is invalid. Must be \"insert\" or \"normal\"",
+				i,
+				tostring(mode)
 			))
 		end
 	end
+	local cp = cfg.behavior.cursor_prediction
+	check_type(cp, "table", "behavior.cursor_prediction")
+	check_type(cp.enabled, "boolean", "behavior.cursor_prediction.enabled")
+	check_type(cp.auto_advance, "boolean", "behavior.cursor_prediction.auto_advance")
+	check_type(cp.proximity_threshold, "number", "behavior.cursor_prediction.proximity_threshold")
 
-	-- Validate fg_opacity
-	if cfg.ui and cfg.ui.completions and cfg.ui.completions.fg_opacity then
-		local f = cfg.ui.completions.fg_opacity
-		if type(f) ~= "number" or f < 0 or f > 1 then
-			error("[cursortab.nvim] ui.completions.fg_opacity must be a number between 0 and 1")
-		end
-	end
-
-	-- Validate numeric ranges
-	if cfg.behavior then
-		if cfg.behavior.idle_completion_delay and cfg.behavior.idle_completion_delay < -1 then
-			error("[cursortab.nvim] behavior.idle_completion_delay must be >= -1")
-		end
-		if cfg.behavior.text_change_debounce and cfg.behavior.text_change_debounce < -1 then
-			error("[cursortab.nvim] behavior.text_change_debounce must be >= -1 (-1 to disable)")
-		end
-		if cfg.behavior.max_visible_lines and cfg.behavior.max_visible_lines < 0 then
-			error("[cursortab.nvim] behavior.max_visible_lines must be >= 0 (0 to disable)")
-		end
-		if cfg.behavior.enabled_modes ~= nil then
-			if type(cfg.behavior.enabled_modes) ~= "table" then
-				error("[cursortab.nvim] behavior.enabled_modes must be a list (e.g., { \"insert\", \"normal\" })")
-			end
-			local valid_modes = { insert = true, normal = true }
-			for i, mode in ipairs(cfg.behavior.enabled_modes) do
-				if type(mode) ~= "string" or not valid_modes[mode] then
-					error(string.format(
-						"[cursortab.nvim] behavior.enabled_modes[%d] = %q is invalid. Must be \"insert\" or \"normal\"",
-						i,
-						tostring(mode)
-					))
-				end
-			end
-		end
-		if cfg.behavior.ignore_paths ~= nil then
-			if type(cfg.behavior.ignore_paths) ~= "table" then
-				error("[cursortab.nvim] behavior.ignore_paths must be a list of glob pattern strings")
-			end
-			for i, pattern in ipairs(cfg.behavior.ignore_paths) do
-				if type(pattern) ~= "string" then
-					error(string.format("[cursortab.nvim] behavior.ignore_paths[%d] must be a string", i))
-				end
-			end
-		end
-		if cfg.behavior.ignore_filetypes ~= nil then
-			if type(cfg.behavior.ignore_filetypes) ~= "table" then
-				error("[cursortab.nvim] behavior.ignore_filetypes must be a list of filetype strings")
-			end
-			for i, ft in ipairs(cfg.behavior.ignore_filetypes) do
-				if type(ft) ~= "string" then
-					error(string.format("[cursortab.nvim] behavior.ignore_filetypes[%d] must be a string", i))
-				end
-			end
-		end
-		if cfg.behavior.ignore_gitignored ~= nil and type(cfg.behavior.ignore_gitignored) ~= "boolean" then
-			error("[cursortab.nvim] behavior.ignore_gitignored must be a boolean")
-		end
-	end
-
-	if cfg.provider then
-		if cfg.provider.context_size and cfg.provider.context_size < 0 then
-			error("[cursortab.nvim] provider.context_size must be >= 0")
-		end
-		if cfg.provider.context_size
-			and cfg.provider.context_size > 0
-			and cfg.provider.max_tokens
-			and cfg.provider.context_size <= cfg.provider.max_tokens then
-			error(
-				string.format(
-					"[cursortab.nvim] provider.context_size must be greater than provider.max_tokens (%d); max_tokens is reserved for generation on top of the prompt budget",
-					cfg.provider.max_tokens
-				)
-			)
-		end
-		if cfg.provider.max_tokens and cfg.provider.max_tokens < 0 then
-			error("[cursortab.nvim] provider.max_tokens must be >= 0")
-		end
-		if cfg.provider.completion_timeout and cfg.provider.completion_timeout < 0 then
-			error("[cursortab.nvim] provider.completion_timeout must be >= 0")
-		end
-		if cfg.provider.max_diff_history_tokens and cfg.provider.max_diff_history_tokens < 0 then
-			error("[cursortab.nvim] provider.max_diff_history_tokens must be >= 0")
-		end
-		if cfg.provider.retrieval_max_chunks and cfg.provider.retrieval_max_chunks < 0 then
-			error("[cursortab.nvim] provider.retrieval_max_chunks must be >= 0")
-		end
-		if cfg.provider.min_confidence and cfg.provider.min_confidence > 0 then
-			error("[cursortab.nvim] provider.min_confidence must be <= 0 (mean token logprob is always <= 0, 0 disables the gate)")
-		end
-		if cfg.provider.completion_path and not cfg.provider.completion_path:match("^/") then
-			error("[cursortab.nvim] provider.completion_path must start with '/'")
-		end
-		if cfg.provider.fim_tokens ~= nil then
-			if type(cfg.provider.fim_tokens) ~= "table" then
-				error("[cursortab.nvim] provider.fim_tokens must be a table with prefix, suffix, and middle fields")
-			end
-			local required_fields = { "prefix", "suffix", "middle" }
-			for _, field in ipairs(required_fields) do
-				local value = cfg.provider.fim_tokens[field]
-				if value == nil or type(value) ~= "string" or value == "" then
-					error(string.format(
-						"[cursortab.nvim] provider.fim_tokens.%s is required and must be a non-empty string",
-						field
-					))
-				end
-			end
-			local optional_fields = { "repo_name", "file_sep", "filename" }
-			for _, field in ipairs(optional_fields) do
-				local value = cfg.provider.fim_tokens[field]
-				if value ~= nil and type(value) ~= "string" then
-					error(string.format(
-						"[cursortab.nvim] provider.fim_tokens.%s must be a string",
-						field
-					))
-				end
-			end
-			if cfg.provider.fim_tokens.suffix_first ~= nil
-				and type(cfg.provider.fim_tokens.suffix_first) ~= "boolean" then
-				error("[cursortab.nvim] provider.fim_tokens.suffix_first must be a boolean")
-			end
-		end
-	end
-	if cfg.next_edit ~= nil then
-		if cfg.next_edit.enabled == true then
-			local valid_types = { ["zeta-2.1"] = true, ["zeta-2"] = true, zeta = true, sweep = true }
-			if not valid_types[cfg.next_edit.type] then
-				error(string.format(
-					"[cursortab.nvim] next_edit.type must be one of: zeta-2.1, zeta-2, zeta, sweep (got %s)",
-					tostring(cfg.next_edit.type)
-				))
-			end
-		end
-		if cfg.next_edit.idle_delay ~= nil
-			and (type(cfg.next_edit.idle_delay) ~= "number" or cfg.next_edit.idle_delay < 0) then
-			error("[cursortab.nvim] next_edit.idle_delay must be a non-negative number")
-		end
-	end
+	check_type(cfg.debug.immediate_shutdown, "boolean", "debug.immediate_shutdown")
 end
 
 ---@class ConfigModule
@@ -552,59 +337,61 @@ function config.get()
 	return current_config
 end
 
+-- Resolve the configured api_key_env into an API key ("" when unset).
+---@return string
+function config.resolve_api_key()
+	local env = current_config.api_key_env
+	if not env or env == "" then
+		return ""
+	end
+	local value = vim.fn.getenv(env)
+	if value == vim.NIL or value == "" then
+		return ""
+	end
+	return value
+end
+
+-- Store a model selection from :Cursortab model, an edit-role pick enables dual mode when it was off
+---@param role "type"|"edit"
+---@param id string
+function config.set_model(role, id)
+	if role == "type" then
+		current_config.model = id
+		return
+	end
+	if type(current_config.next_edit) ~= "table" then
+		current_config.next_edit = { model = id }
+	else
+		current_config.next_edit.model = id
+	end
+end
+
+-- Record the outcome of the last :Cursortab model probe for checkhealth.
+---@param result CursortabProbeResult|nil
+function config.set_probe_result(result)
+	last_probe = result
+end
+
+---@return CursortabProbeResult|nil
+function config.get_probe_result()
+	return last_probe
+end
+
 -- Set up configuration with user overrides
 ---@param user_config table|nil User configuration overrides
 ---@return CursortabConfig
 function config.setup(user_config)
-	local migrated = migrate_deprecated_config(user_config or {})
+	local migrated = user_config or {}
+	local validation_defaults = vim.tbl_deep_extend("force", vim.deepcopy(default_config), vim.deepcopy(optional_templates))
+	validate_config_keys(migrated, validation_defaults, "")
 
-	-- Resolve FIM token presets (e.g. fim_tokens = "mellum") into token tables
-	if type(migrated.provider) == "table" and type(migrated.provider.fim_tokens) == "string" then
-		local preset = fim_presets[migrated.provider.fim_tokens]
-		if not preset then
-			local names = vim.tbl_keys(fim_presets)
-			table.sort(names)
-			error(string.format(
-				"[cursortab.nvim] provider.fim_tokens preset %q not found. Available presets: %s",
-				migrated.provider.fim_tokens,
-				table.concat(names, ", ")
-			))
-		end
-		migrated.provider.fim_tokens = vim.deepcopy(preset)
+	local merged = vim.tbl_deep_extend("force", vim.deepcopy(default_config), migrated)
+	-- next_edit tables given without a model inherit the auto-pick default
+	if type(merged.next_edit) == "table" and merged.next_edit.model == nil then
+		merged.next_edit.model = "auto"
 	end
-
-	validate_config(migrated)
-	current_config = vim.tbl_deep_extend("force", vim.deepcopy(default_config), migrated)
-
-	-- Apply per-provider defaults when the user hasn't explicitly set them
-	local p = current_config.provider
-	local user_p = migrated.provider or {}
-	local provider_defaults = {
-		inline = { context_size = 1024, max_tokens = 64 },
-		fim = { context_size = 1024, max_tokens = 128 },
-	}
-	local defaults = provider_defaults[p.type]
-	if defaults then
-		for key, value in pairs(defaults) do
-			if user_p[key] == nil then
-				p[key] = value
-			end
-		end
-	end
-
-	-- Auto-detect repo-level FIM tokens from model name when not explicitly set
-	-- Only apply when the user has explicitly configured fim_tokens.
-	if user_p.fim_tokens ~= nil then
-		local user_fim = user_p.fim_tokens
-		if user_fim.repo_name == nil and user_fim.file_sep == nil then
-			local model_lower = (p.model or ""):lower()
-			-- Qwen family (Qwen2.5-Coder, Qwen3.5) and Zeta (Qwen2.5-Coder based)
-			if model_lower:match("qwen") or (p.type == "zeta") then
-				p.fim_tokens.repo_name = "<|repo_name|>"
-				p.fim_tokens.file_sep = "<|file_sep|>"
-			end
-		end
-	end
+	validate_values(merged)
+	current_config = merged
 
 	return current_config
 end

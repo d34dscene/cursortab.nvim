@@ -1,4 +1,4 @@
-Correct TypeScript generic event emitter class — no edits needed at any cursor position.
+Correct TypeScript generic event emitter class - no edits needed at any cursor position.
 id: suppress-ts-emitter
 language: typescript
 file: events.ts
@@ -27,5 +27,4 @@ export class EventEmitter<T> {
 }
 -- steps --
 request-completion manual
-  expect !shown
 

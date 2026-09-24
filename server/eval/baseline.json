@@ -1,80 +1,32 @@
 {
-  "copilot": {
-    "score": 0.12723002762832217,
-    "deltaChrF": 22.265254834956377,
-    "showRate": 0.4,
+  "mellum-4b": {
+    "score": 0.15659736210643174,
+    "deltaChrF": 22.88730676940156,
+    "showRate": 0.52,
     "quietRate": 1
-  },
-  "mercuryapi": {
-    "score": 0.48355787297176717,
-    "deltaChrF": 61.836045137054626,
-    "showRate": 0.92,
-    "quietRate": 0.68
   },
   "qwen3.5-0.8B": {
-    "score": 0.21150263013495899,
-    "deltaChrF": 37.253304171498456,
-    "showRate": 0.8,
+    "score": 0.19732774455666557,
+    "deltaChrF": 34.16930641673863,
+    "showRate": 0.84,
     "quietRate": 0.44
   },
-  "qwen3.5-2B": {
-    "score": 0.19916524641048056,
-    "deltaChrF": 35.08024226548237,
-    "showRate": 0.8,
-    "quietRate": 0.44
-  },
-  "qwen3.5-4B": {
-    "score": 0.18377870507132166,
-    "deltaChrF": 28.71542266739401,
-    "showRate": 0.64,
-    "quietRate": 0.64
-  },
-  "qwen3.6-27B": {
-    "score": 0.23247033414491206,
-    "deltaChrF": 32.006785135893686,
-    "showRate": 0.6,
-    "quietRate": 0.92
-  },
-  "qwen3.6-35B-A3B": {
-    "score": 0.10261098544681499,
-    "deltaChrF": 19.23955977127781,
-    "showRate": 0.4,
-    "quietRate": 0.8
-  },
-  "sweep-next-edit-0.5B": {
-    "score": 0.10422376756540595,
-    "deltaChrF": 23.04948705773401,
-    "showRate": 0.52,
+  "sweep-next-edit-v2-7B": {
+    "score": 0.11240950830064529,
+    "deltaChrF": 25.760512318897877,
+    "showRate": 0.48,
     "quietRate": 0.4
-  },
-  "sweep-next-edit-1.5B": {
-    "score": 0.20563437497615986,
-    "deltaChrF": 43.68050448839997,
-    "showRate": 0.68,
-    "quietRate": 0.36
-  },
-  "sweep-next-edit-7B": {
-    "score": 0.22666314170176116,
-    "deltaChrF": 46.04095065817024,
-    "showRate": 0.64,
-    "quietRate": 0.4
-  },
-  "windsurf": {
-    "score": 0.13076328837372903,
-    "deltaChrF": 19.11155753154501,
-    "showRate": 0.52,
-    "quietRate": 1
-  },
-  "zeta": {
-    "score": 0.5616320137623684,
-    "deltaChrF": 62.43438888168621,
-    "showRate": 0.88,
-    "quietRate": 0.92
   },
   "zeta-2": {
-    "score": 0.6149166849505295,
-    "deltaChrF": 65.44629572616596,
-    "showRate": 0.92,
+    "score": 0.230781341604555,
+    "deltaChrF": 32.62533847088203,
+    "showRate": 0.56,
     "quietRate": 0.96
+  },
+  "zeta-2.1": {
+    "score": 0.2605875589230706,
+    "deltaChrF": 34.74500785640942,
+    "showRate": 0.6,
+    "quietRate": 1
   }
 }

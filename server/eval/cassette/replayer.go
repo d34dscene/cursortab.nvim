@@ -11,7 +11,7 @@ import (
 
 // Replayer is an http.RoundTripper that returns pre-recorded responses from a
 // cassette, in the order they were captured. Requests beyond the recorded
-// count fail loudly rather than falling back to the network — the whole point
+// count fail loudly rather than falling back to the network. The whole point
 // is that evaluation never touches real APIs.
 type Replayer struct {
 	cassette *Cassette

@@ -6,10 +6,10 @@ import (
 
 // Score bundles the metrics for one (scenario, provider) result.
 type Score struct {
-	DeltaChrF float64 // [0, 100] — primary quality signal
+	DeltaChrF float64 // [0, 100], primary quality signal
 	LatencyMs int64
 	Shown     bool
-	Combined  float64 // deltaChrF × shown — expected quality per keystroke
+	Combined  float64 // deltaChrF × shown, expected quality per keystroke
 }
 
 // Compute evaluates all metrics for one result.

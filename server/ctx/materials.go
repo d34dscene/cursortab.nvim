@@ -1,9 +1,13 @@
 package ctx
 
 import (
+	"bufio"
 	"context"
+	"os/exec"
+	"path/filepath"
 	"slices"
 	"strings"
+	"time"
 
 	"cursortab/buffer"
 	"cursortab/logger"
@@ -91,6 +95,113 @@ func (GitDiff) collect(ctx context.Context, input ContextSourceInput) (material,
 	}
 	result.Data = &types.GitDiffContext{Diff: strings.Join(symbols, "\n")}
 	return result, nil
+}
+
+// gitTimeout bounds one git invocation so staged-diff collection never stalls
+// a completion.
+const gitTimeout = 200 * time.Millisecond
+
+// runGit executes a git command bounded by gitTimeout and returns its stdout,
+// or "" on failure.
+func runGit(ctx context.Context, dir string, args ...string) string {
+	ctx, cancel := context.WithTimeout(ctx, gitTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd.Dir = dir
+	out, err := cmd.Output()
+	if err != nil {
+		logger.Debug("gitdiff: git %s failed: %v", args[0], err)
+		return ""
+	}
+	return string(out)
+}
+
+// extractChangedSymbols parses a unified diff (-U0) and extracts function/type
+// signatures from added/removed declaration lines in git diff format.
+func extractChangedSymbols(diff string, maxSymbols int) []string {
+	if diff == "" {
+		return nil
+	}
+
+	seen := make(map[string]struct{})
+	var symbols []string
+
+	scanner := bufio.NewScanner(strings.NewReader(diff))
+
+	for scanner.Scan() {
+		line := scanner.Text()
+
+		// Skip metadata lines
+		if strings.HasPrefix(line, "diff --git ") ||
+			strings.HasPrefix(line, "---") ||
+			strings.HasPrefix(line, "+++") ||
+			strings.HasPrefix(line, "index ") ||
+			strings.HasPrefix(line, "@@") {
+			continue
+		}
+
+		// Extract added declaration lines
+		if strings.HasPrefix(line, "+") {
+			content := strings.TrimSpace(line[1:])
+			if isDeclarationLine(content) {
+				sym := "+" + content
+				if _, ok := seen[sym]; !ok && len(symbols) < maxSymbols {
+					seen[sym] = struct{}{}
+					symbols = append(symbols, sym)
+				}
+			}
+			continue
+		}
+
+		// Extract removed declaration lines
+		if strings.HasPrefix(line, "-") {
+			content := strings.TrimSpace(line[1:])
+			if isDeclarationLine(content) {
+				sym := "-" + content
+				if _, ok := seen[sym]; !ok && len(symbols) < maxSymbols {
+					seen[sym] = struct{}{}
+					symbols = append(symbols, sym)
+				}
+			}
+		}
+	}
+
+	return symbols
+}
+
+// isDeclarationLine checks if a line looks like a function/type/class declaration
+// across common languages (Go, Python, Rust, JS/TS, C/C++, Java).
+func isDeclarationLine(line string) bool {
+	prefixes := []string{
+		"func ", "func(", // Go
+		"def ",                     // Python
+		"class ",                   // Python, JS/TS, Java, C++
+		"type ",                    // Go, TS
+		"struct ",                  // Go, Rust, C/C++
+		"fn ",                      // Rust
+		"impl ",                    // Rust
+		"trait ",                   // Rust
+		"enum ",                    // Rust, Java, TS
+		"interface ",               // Go, TS, Java
+		"export function ",         // JS/TS
+		"export default function ", // JS/TS
+		"export const ",            // JS/TS
+		"export class ",            // JS/TS
+		"async function ",          // JS/TS
+		"export async function ",   // JS/TS
+		"public ",                  // Java, C#
+		"private ",                 // Java, C#
+		"protected ",               // Java, C#
+		"static ",                  // Java, C/C++
+	}
+
+	for _, prefix := range prefixes {
+		if strings.HasPrefix(line, prefix) {
+			return true
+		}
+	}
+
+	return false
 }
 
 type RecentFiles struct {
@@ -247,21 +358,106 @@ func budgetedDiffEntries(diffs []*types.DiffEntry, path string, input ContextSou
 	return utils.TrimDiffEntries(diffs, tokenCap)
 }
 
-type UserActions struct {
-	Actions []*types.UserAction
+// Retriever answers cursor-derived lookups against a workspace code index.
+// Implemented by index.Manager. It must never block on index construction.
+type Retriever interface {
+	Retrieve(q types.RetrievalQuery) []types.RetrievalChunk
 }
 
-func (UserActions) collect(_ context.Context, input ContextSourceInput) (material, error) {
-	var result UserActions
-	for _, action := range input.Snapshot.UserActions {
-		if action == nil || action.FilePath != input.Current.File.Path {
-			continue
+// retrievalQueryWindowLines is how far around the cursor source is scanned to
+// build the query. Wide enough to catch the block being edited, narrow enough
+// to stay about the cursor.
+const retrievalQueryWindowLines = 40
+
+// perChunkOverheadBytes covers the path line and section framing added when a
+// chunk is rendered into a prompt.
+const perChunkOverheadBytes = 16
+
+// Retrieval carries workspace code selected for the cursor. Conversation with
+// the index happens through ContextSourceInput.Retriever.
+type Retrieval struct {
+	Data *types.RetrievalContext
+}
+
+func (Retrieval) collect(_ context.Context, input ContextSourceInput) (material, error) {
+	if input.Retriever == nil {
+		return Retrieval{}, nil
+	}
+	q := buildRetrievalQuery(input)
+	if q.Root == "" || len(q.Identifiers) == 0 {
+		return Retrieval{}, nil
+	}
+
+	chunks := input.Retriever.Retrieve(q)
+	if len(chunks) == 0 {
+		return Retrieval{}, nil
+	}
+
+	kept := make([]types.RetrievalChunk, 0, len(chunks))
+	for _, c := range chunks {
+		if input.Budget != nil {
+			cost := len(c.Content) + len(c.Path) + perChunkOverheadBytes
+			if cost > input.Budget.Remaining() {
+				continue
+			}
+			input.Budget.Take(cost)
 		}
-		clone := *action
-		result.Actions = append(result.Actions, &clone)
+		kept = append(kept, c)
 	}
-	if input.Limits.MaxUserActions > 0 && len(result.Actions) > input.Limits.MaxUserActions {
-		result.Actions = result.Actions[len(result.Actions)-input.Limits.MaxUserActions:]
+	if len(kept) == 0 {
+		return Retrieval{}, nil
 	}
-	return result, nil
+	return Retrieval{Data: &types.RetrievalContext{Chunks: kept}}, nil
+}
+
+// buildRetrievalQuery derives the lookup from the cursor. Identifiers come
+// from the lines immediately around the cursor and the enclosing declaration,
+// which is where the reused names live.
+func buildRetrievalQuery(input ContextSourceInput) types.RetrievalQuery {
+	lines := input.Current.File.Lines
+	if len(lines) == 0 {
+		return types.RetrievalQuery{}
+	}
+
+	row := input.Current.Cursor.Row
+	start := max(1, row-retrievalQueryWindowLines)
+	end := min(len(lines), row+retrievalQueryWindowLines)
+	window := strings.Join(lines[start-1:end], "\n")
+
+	nearStart := max(1, row-4)
+	nearEnd := min(len(lines), row+4)
+	near := strings.Join(lines[nearStart-1:nearEnd], "\n")
+
+	var enclosing string
+	if input.Buffer != nil {
+		if ts := input.Buffer.TreesitterSymbols(row, input.Current.Cursor.Col, 0); ts != nil {
+			enclosing = ts.EnclosingSignature
+		}
+	}
+
+	identifiers := utils.TokenizeCode(near + "\n" + enclosing)
+
+	limit := input.Limits.MaxRetrievalChunks
+	if limit <= 0 {
+		limit = 0 // index applies its own default
+	}
+
+	return types.RetrievalQuery{
+		Root:        input.Current.WorkspacePath,
+		CurrentPath: relativePath(input.Current.WorkspacePath, input.Current.File.Path),
+		Identifiers: identifiers,
+		Tokens:      utils.TokenizeCode(window),
+		Limit:       limit,
+	}
+}
+
+func relativePath(root, path string) string {
+	if root == "" || path == "" {
+		return filepath.ToSlash(path)
+	}
+	rel, err := filepath.Rel(root, path)
+	if err != nil {
+		return filepath.ToSlash(path)
+	}
+	return filepath.ToSlash(rel)
 }

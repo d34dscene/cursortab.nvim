@@ -2,9 +2,7 @@ package ctx
 
 import (
 	"context"
-	"errors"
 	"testing"
-	"time"
 
 	"cursortab/assert"
 )
@@ -39,12 +37,11 @@ func TestCollectRunsMaterialsInOrder(t *testing.T) {
 		}
 	}
 
-	materials, _, err := Collect(context.Background(), ContextSourceInput{}, Materials{
+	materials, _ := Collect(context.Background(), ContextSourceInput{}, Materials{
 		testMaterial{name: "first", collectFn: collectOne("first")},
 		testMaterial{name: "second", collectFn: collectOne("second")},
 	})
 
-	assert.NoError(t, err, "collect")
 	assert.Equal(t, []string{"first", "second"}, calls, "call order")
 	assert.Len(t, 2, materials, "materials")
 	first, ok := materials[0].(collectedTestMaterial)
@@ -55,35 +52,38 @@ func TestCollectRunsMaterialsInOrder(t *testing.T) {
 	assert.Equal(t, "second", second.name, "second material order")
 }
 
-func TestCollectWrapsMaterialError(t *testing.T) {
-	sourceErr := errors.New("source failed")
-	_, _, err := Collect(context.Background(), ContextSourceInput{}, Materials{
+func TestCollectDegradesFailingMaterialToEmpty(t *testing.T) {
+	materials, used := Collect(context.Background(), ContextSourceInput{}, Materials{
+		testMaterial{name: "ok"},
 		testMaterial{
 			name: "broken",
 			collectFn: func(context.Context, ContextSourceInput) (material, error) {
-				return nil, sourceErr
+				return nil, context.DeadlineExceeded
 			},
 		},
 	})
 
-	assert.Error(t, err, "collect error")
-	assert.Contains(t, err.Error(), "ctx.testMaterial", "material type in error")
-	assert.True(t, errors.Is(err, sourceErr), "wrapped source error")
+	assert.Len(t, 2, materials, "every request yields a material")
+	first, ok := materials[0].(collectedTestMaterial)
+	assert.True(t, ok, "healthy material collected")
+	assert.Equal(t, "ok", first.name, "healthy material value")
+	_, ok = materials[1].(testMaterial)
+	assert.True(t, ok, "failing material degrades to its empty request")
+	assert.Equal(t, 0, used, "no budget means no usage tracking")
 }
 
-func TestCollectPassesSharedTimeoutToCooperativeMaterial(t *testing.T) {
-	start := time.Now()
-	_, _, err := Collect(context.Background(), ContextSourceInput{}, Materials{
+func TestCollectImposesNoDeadlineOnMaterials(t *testing.T) {
+	var sawDeadline bool
+
+	_, _ = Collect(context.Background(), ContextSourceInput{}, Materials{
 		testMaterial{
-			name: "slow",
+			name: "observer",
 			collectFn: func(ctx context.Context, _ ContextSourceInput) (material, error) {
-				<-ctx.Done()
-				return nil, ctx.Err()
+				_, sawDeadline = ctx.Deadline()
+				return collectedTestMaterial{name: "observer"}, nil
 			},
 		},
 	})
 
-	assert.Error(t, err, "timeout")
-	assert.Contains(t, err.Error(), context.DeadlineExceeded.Error(), "deadline error")
-	assert.Less(t, int(time.Since(start)), int(time.Second), "timeout bounded")
+	assert.False(t, sawDeadline, "collect passes the parent context without a synthetic timeout")
 }

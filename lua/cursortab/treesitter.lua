@@ -40,7 +40,9 @@ function M.get_context(bufnr, row, col, max_siblings)
 
 	local cursor_node = vim.treesitter.get_node({ bufnr = bufnr, pos = { row, col } })
 	if not cursor_node then
-		return {}
+		-- nil, not {}: an empty Lua table encodes as a msgpack array and the
+		-- Go side decodes this reply as a map.
+		return nil
 	end
 
 	-- Walk up to find enclosing scope

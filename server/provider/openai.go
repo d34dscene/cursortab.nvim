@@ -8,35 +8,36 @@ import (
 	"sync"
 
 	"cursortab/client/openai"
-	sourcectx "cursortab/ctx"
 	"cursortab/engine"
 	"cursortab/logger"
 	"cursortab/types"
 )
 
-// OpenAI supplies the Call stage for providers that use the OpenAI completions
-// API. Leaf providers embed it, build their own prompt in Build, and parse the
-// resulting openai.CompletionResult in Parse.
+// OpenAI is the shared transport for every dialect: config-derived request
+// fields come from the provider config, prompt/suffix/stop from the dialect
+// build.
 type OpenAI struct {
 	config *types.ProviderConfig
 	name   string
+	path   string
 	client *openai.Client
 }
 
 func NewOpenAI(name string, config *types.ProviderConfig) OpenAI {
+	path := config.CompletionPath
+	if path == "" {
+		path = openai.DefaultCompletionPath
+	}
 	return OpenAI{
 		config: config,
 		name:   name,
-		client: openai.NewClient(config.ProviderURL, config.CompletionPath, config.APIKey),
+		path:   path,
+		client: openai.NewClient(config.Endpoint.URL, path, config.Endpoint.APIKey),
 	}
 }
 
-func (o OpenAI) ProviderConfig() *types.ProviderConfig {
-	return o.config
-}
-
-// Call maps one OpenAI completion response to the RawResult used by OpenAI
-// based CompletionFlow implementations.
+// Call runs one batch completion and maps choice 0 into the raw result shape
+// shared by batch and stream parsing.
 func (o OpenAI) Call(ctx context.Context, req *openai.CompletionRequest) (*openai.CompletionResult, error) {
 	resp, err := o.client.DoCompletion(ctx, req)
 	if err != nil {
@@ -55,7 +56,8 @@ func (o OpenAI) Call(ctx context.Context, req *openai.CompletionRequest) (*opena
 	return result, nil
 }
 
-// SetHTTPTransport is used by eval cassette record/replay.
+// SetHTTPTransport swaps the HTTP transport. Used by the eval harness for
+// cassette record and replay.
 func (o OpenAI) SetHTTPTransport(rt http.RoundTripper) {
 	o.client.SetHTTPTransport(rt)
 }
@@ -63,8 +65,8 @@ func (o OpenAI) SetHTTPTransport(rt http.RoundTripper) {
 func (o OpenAI) LogRequest(req *openai.CompletionRequest, maxLines int) {
 	logger.Debug("%s provider request:\n  URL: %s%s\n  Model: %s\n  Temperature: %.2f\n  MaxTokens: %d\n  MaxLines: %d\n  Prompt length: %d chars\n  Prompt:\n%s",
 		o.name,
-		o.config.ProviderURL,
-		o.config.CompletionPath,
+		o.config.Endpoint.URL,
+		o.path,
 		req.Model,
 		req.Temperature,
 		req.MaxTokens,
@@ -73,27 +75,21 @@ func (o OpenAI) LogRequest(req *openai.CompletionRequest, maxLines int) {
 		req.Prompt)
 }
 
-// Request fills the config-derived OpenAI fields shared by every OpenAI leaf.
-// Prompt, suffix, and stop tokens remain leaf protocol facts.
+// Request fills the config-derived OpenAI fields shared by every dialect.
+// Prompt, suffix, and stop tokens remain dialect protocol facts.
 func (o OpenAI) Request(prompt string, stop []string) *openai.CompletionRequest {
 	return &openai.CompletionRequest{
-		Model:       o.config.ProviderModel,
+		Model:       o.config.Endpoint.Model,
 		Prompt:      prompt,
-		Temperature: o.config.ProviderTemperature,
-		MaxTokens:   o.config.ProviderMaxTokens,
-		TopK:        o.config.ProviderTopK,
-		MinP:        o.config.ProviderMinP,
-		RepeatPen:   o.config.ProviderRepeatPen,
+		Temperature: o.config.Temperature,
+		MaxTokens:   o.config.Endpoint.MaxTokens,
 		Logprobs:    logprobCount(o.config),
 		Stop:        stop,
-		N:           1,
-		Echo:        false,
 	}
 }
 
-// logprobCount is the OpenAI completions `logprobs` request value: the number
-// of most-likely tokens to return per position. One is enough to read the
-// chosen token's confidence.
+// logprobCount is the completions `logprobs` request value: one most-likely
+// token per position is enough to read the chosen token's confidence.
 func logprobCount(config *types.ProviderConfig) int {
 	if config.Logprobs {
 		return 1
@@ -110,24 +106,20 @@ func logOpenAIResponse(name string, result *openai.CompletionResult) {
 		result.Text)
 }
 
-// OpenAIStreamArgs is the leaf-selected stream behavior for one built request.
-// Sweep uses prefill and first-line validation. Zeta uses first-line
-// validation. Zeta2 uses a cursor-marker line transform and its own stream
-// window. Engine sees only the CompletionStream returned by StartStream.
-type OpenAIStreamArgs struct {
+// streamSpec is the dialect-selected stream behavior for one built request.
+// Sweep uses prefill and first-line validation. FIM attaches cursor-line
+// context around raw insertion lines. Zeta-2 uses a cursor-marker line
+// transform and its editable-region window. Engine only sees the
+// CompletionStream built from it.
+type streamSpec struct {
 	WindowStart        int
 	OldLines           []string
 	Prefill            string
 	FirstLineValidator func(*RequestState, string) error
 	LineTransform      func(string) (string, bool, error)
-	// FinalLine emits one last line after the stream ends. Used by transforms
-	// that hold back a line until they know it is the last one.
+	// FinalLine emits one last line after the stream ends. Used by
+	// transforms that hold back a line until they know it is the last one.
 	FinalLine func() (string, bool)
-}
-
-type OpenAIStreamFlow interface {
-	CompletionFlow[*openai.CompletionRequest, *openai.CompletionResult]
-	StreamArgs(*RequestState) OpenAIStreamArgs
 }
 
 // lineStreamSession is the streaming Call runtime. It forwards visible lines
@@ -152,33 +144,24 @@ type lineStreamSession struct {
 	err       error
 }
 
-func (o OpenAI) StartStream(ctx context.Context, input sourcectx.CompletionInput, config *types.ProviderConfig, flow OpenAIStreamFlow) (engine.CompletionStream, error) {
-	state := prepareRequestState(input, config)
-	req, err := flow.Build(state)
-	if err != nil {
-		return nil, err
-	}
-	return o.startStream(ctx, state, req, flow.StreamArgs(state), flow.Parse)
-}
-
 func (o OpenAI) startStream(
 	ctx context.Context,
 	state *RequestState,
 	req *openai.CompletionRequest,
-	args OpenAIStreamArgs,
+	spec streamSpec,
 	parse func(*RequestState, *openai.CompletionResult) (*types.CompletionResponse, error),
 ) (engine.CompletionStream, error) {
 	run := &lineStreamSession{
 		name:               o.name,
 		stream:             o.client.DoLineStream(ctx, req, state.Window.MaxLines),
-		windowStart:        args.WindowStart,
-		oldLines:           args.OldLines,
+		windowStart:        spec.WindowStart,
+		oldLines:           spec.OldLines,
 		lines:              make(chan string, 100),
 		cancelCh:           make(chan struct{}),
-		prefill:            args.Prefill,
-		firstLineValidator: args.FirstLineValidator,
-		lineTransform:      args.LineTransform,
-		finalLine:          args.FinalLine,
+		prefill:            spec.Prefill,
+		firstLineValidator: spec.FirstLineValidator,
+		lineTransform:      spec.LineTransform,
+		finalLine:          spec.FinalLine,
 		parse:              parse,
 		state:              state,
 	}
@@ -201,8 +184,8 @@ func (s *lineStreamSession) Cancel() {
 	})
 }
 
-// Finish turns the accumulated stream text into the same RawResult shape as
-// batch Call, then invokes the leaf Parse function.
+// Finish turns the accumulated stream text into the same raw result shape as
+// batch Call, then invokes the dialect parse function.
 func (s *lineStreamSession) Finish() (*types.CompletionResponse, error) {
 	rawResult := s.doneResult()
 	if s.err != nil {

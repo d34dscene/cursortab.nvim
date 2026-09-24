@@ -2,8 +2,7 @@ package engine
 
 import (
 	"fmt"
-	"regexp"
-	"slices"
+	"hash/fnv"
 	"strings"
 	"time"
 
@@ -12,91 +11,63 @@ import (
 	"cursortab/types"
 )
 
-// inertSuffixPattern matches cursor suffixes where insertion-only completions
-// are still useful: whitespace, closing brackets, trailing punctuation.
-// Matches Copilot's heuristic: /^\s*[)>}\]"'`]*\s*[:{;,]?\s*$/
-var inertSuffixPattern = regexp.MustCompile(`^\s*[)>}\]"'` + "`" + `]*\s*[:{;,]?\s*$`)
+// SuppressReason names why a completion did not reach the provider or the
+// buffer. "" means allowed.
+type SuppressReason string
 
 const (
-	// consecutiveDeletionThreshold is the number of consecutive deletion actions
-	// after which completions are re-enabled (user is rewriting, not correcting).
-	consecutiveDeletionThreshold = 3
-
-	rejectedCompletionTTL                 = 30 * time.Second
-	rejectedCompletionLineProximity       = 3
-	rejectedCompletionContextThreshold    = 0.9
-	rejectedCompletionOldLinesThreshold   = 0.9
-	rejectedCompletionSimilarityThreshold = 0.85
-	// rejectedCompletionMinLineSimilarity prevents a single very-different
-	// line from being averaged away by surrounding identical lines.
-	rejectedCompletionMinLineSimilarity = 0.5
-	rejectedCompletionMaxPerFile        = 8
+	SuppressNone           SuppressReason = ""
+	SuppressNoEdits        SuppressReason = "no-edits"
+	SuppressDisabledScope  SuppressReason = "disabled-scope"
+	SuppressSingleDeletion SuppressReason = "single-deletion"
+	SuppressLowConfidence  SuppressReason = "low-confidence"
+	SuppressRejectionCache SuppressReason = "rejection-cache"
+	SuppressStale          SuppressReason = "stale"
+	SuppressMode           SuppressReason = "mode"
 )
 
-type rejectedCompletion struct {
-	filePath   string
-	startLine  int
-	endLineInc int
-	beforeLine string
-	afterLine  string
-	oldLines   []string
-	lines      []string
-	expiresAt  time.Time
+const (
+	// consecutiveDeletionThreshold is the number of consecutive deletion
+	// changes after which completions are re-enabled (user is rewriting, not
+	// correcting).
+	consecutiveDeletionThreshold = 3
+
+	rejectedCompletionTTL = 30 * time.Second
+)
+
+// logSuppressed is the single Info-level sink for suppression outcomes.
+func logSuppressed(reason SuppressReason, detail string) {
+	if detail != "" {
+		logger.Info("suppressed: %s (%s)", reason, detail)
+		return
+	}
+	logger.Info("suppressed: %s", reason)
 }
 
-// suppressForSingleDeletion returns true if the last action was a single
-// deletion (typo correction) without a streak of deletions (rewrite).
-func (e *Engine) suppressForSingleDeletion() bool {
-	if len(e.userActions) == 0 {
-		return false
+// suppressRequest gates a request before the provider is called. Manual
+// triggers bypass every gate.
+func (e *Engine) suppressRequest(source Source, manual bool) (SuppressReason, string) {
+	if manual {
+		return SuppressNone, ""
 	}
-
-	last := e.userActions[len(e.userActions)-1]
-	if !isDeletion(last.ActionType) {
-		return false
+	if !e.isModeEnabled() {
+		return SuppressMode, ""
 	}
-
-	// Count consecutive deletions from the end
-	consecutive := 0
-	for _, v := range slices.Backward(e.userActions) {
-		if isDeletion(v.ActionType) {
-			consecutive++
-		} else {
-			break
-		}
+	if source == SourceIdle && e.suppressForNoEdits() {
+		return SuppressNoEdits, ""
 	}
-
-	// A streak of deletions means the user is rewriting → allow completions
-	return consecutive < consecutiveDeletionThreshold
+	if scope := e.suppressForDisabledScope(); scope != "" {
+		return SuppressDisabledScope, scope
+	}
+	if source == SourceTyping && e.suppressForSingleDeletion() {
+		return SuppressSingleDeletion, ""
+	}
+	return SuppressNone, ""
 }
 
-// suppressForMidLine returns true if the cursor is in the middle of a line
-// with meaningful code to the right, and the provider cannot complete there.
-func (e *Engine) suppressForMidLine() bool {
-	if e.provider.CompletionKind() != CompletionInline {
-		return false
-	}
-
-	lines := e.buffer.Lines()
-	row := e.buffer.Row() // 1-indexed
-	col := e.buffer.Col() // 0-indexed
-
-	if row < 1 || row > len(lines) {
-		return false
-	}
-
-	line := lines[row-1]
-	if col >= len(line) {
-		return false // cursor at end of line
-	}
-
-	suffix := line[col:]
-	return !inertSuffixPattern.MatchString(suffix)
-}
-
-// suppressForNoEdits returns true if the buffer hasn't changed since the last
-// save (or initial open). Files that skip history (e.g. COMMIT_EDITMSG) are
-// never suppressed.
+// suppressForNoEdits reports whether the buffer has not changed since the
+// last save or open. Files that skip history (e.g. COMMIT_EDITMSG) are never
+// suppressed.
 func (e *Engine) suppressForNoEdits() bool {
 	if e.buffer.SkipHistory() {
 		return false
@@ -104,23 +75,20 @@ func (e *Engine) suppressForNoEdits() bool {
 	return !e.buffer.IsModified()
 }
 
-// suppressForDisabledScope returns the matched scope name if the cursor is
-// inside a treesitter scope listed in DisabledIn, or "" if not suppressed.
+// suppressForDisabledScope returns the matched scope name when the cursor sits
+// inside a treesitter scope listed in DisabledIn.
 func (e *Engine) suppressForDisabledScope() string {
 	if len(e.config.DisabledIn) == 0 {
 		return ""
 	}
-
 	scopes := e.buffer.CursorScopes()
 	if len(scopes) == 0 {
 		return ""
 	}
-
 	disabled := make(map[string]bool, len(e.config.DisabledIn))
 	for _, s := range e.config.DisabledIn {
 		disabled[s] = true
 	}
-
 	for _, scope := range scopes {
 		if disabled[scope] {
 			return scope
@@ -129,57 +97,138 @@ func (e *Engine) suppressForDisabledScope() string {
 	return ""
 }
 
-// suppressRejectedCompletionForStage returns true when the staged completion
-// is similar to one the user recently rejected in this file. Suppression is
-// always done at stage granularity because that's also how cache entries are
-// stored — the user only sees one stage at a time. It emits exactly one
-// debug log per call describing the outcome.
+// suppressForSingleDeletion reports whether the last text change was a
+// single-deletion correction (a streak shorter than the rewrite threshold).
+func (e *Engine) suppressForSingleDeletion() bool {
+	return e.deletionStreak > 0 && e.deletionStreak < consecutiveDeletionThreshold
+}
+
+// updateDeletionStreak classifies an incoming text_changed payload into the
+// deletion streak. Deltas carry no old line content, so a same-line change is
+// classified by cursor movement: a cursor that stayed or moved left deleted
+// text, a cursor that moved right inserted it. A cursor move without a text
+// change resets the streak, matching "the last action was a deletion".
+func (e *Engine) updateDeletionStreak(payload map[string]any) {
+	// The classifier consumes the previous cursor position, then adopts this
+	// payload's position as the previous one for the next change.
+	defer func() {
+		if row, col, ok := payloadPosition(payload); ok {
+			e.prevRow, e.prevCol, e.hasCursorPos = row, col, true
+		}
+	}()
+
+	changed, ok := payload["changed"].(map[string]any)
+	if !ok {
+		e.deletionStreak = 0
+		return
+	}
+	first, okFirst := payloadInt(changed["first"])
+	lastOld, okOld := payloadInt(changed["last_old"])
+	lastNew, okNew := payloadInt(changed["last_new"])
+	if !okFirst || !okOld || !okNew {
+		e.deletionStreak = 0
+		return
+	}
+	oldCount := lastOld - first
+	newCount := lastNew - first
+	switch {
+	case newCount > oldCount:
+		e.deletionStreak = 0
+	case newCount < oldCount:
+		e.deletionStreak++
+	case oldCount == 1:
+		row, col, hasPos := payloadPosition(payload)
+		if hasPos && e.hasCursorPos && row == e.prevRow && col <= e.prevCol {
+			e.deletionStreak++
+		} else {
+			e.deletionStreak = 0
+		}
+	default:
+		e.deletionStreak = 0
+	}
+}
+
+// suppressLowConfidence drops a completion whose provider-reported mean token
+// logprob is below the configured floor. Mean logprobs are always <= 0, so a
+// floor that gates is negative: 0 disables. A provider without logprobs leaves
+// Confidence nil and is never dropped.
+func (e *Engine) suppressLowConfidence(response *types.CompletionResponse, manual bool) bool {
+	if manual || e.config.MinConfidence >= 0 || response.Confidence == nil {
+		return false
+	}
+	if *response.Confidence >= e.config.MinConfidence {
+		return false
+	}
+	logSuppressed(SuppressLowConfidence,
+		fmt.Sprintf("%.2f < %.2f", *response.Confidence, e.config.MinConfidence))
+	return true
+}
+
+// rejectedCompletion is a cached rejection key: the normalized content hash of
+// what the user saw, scoped to one file with a TTL.
+type rejectedCompletion struct {
+	filePath    string
+	contentHash uint64
+	expiresAt   time.Time
+}
+
+// rejectedCompletionFor builds a cache candidate from a completion.
+func (e *Engine) rejectedCompletionFor(comp *types.Completion) *rejectedCompletion {
+	if comp == nil {
+		return nil
+	}
+	return &rejectedCompletion{
+		filePath:    e.buffer.Path(),
+		contentHash: completionContentHash(comp.Lines),
+	}
+}
+
+// rejectedCompletionForStage builds a candidate from a stage, used by
+// cursor-target-only render paths that did not show ghost text.
+func (e *Engine) rejectedCompletionForStage(stage *text.Stage) *rejectedCompletion {
+	if stage == nil {
+		return nil
+	}
+	return e.rejectedCompletionFor(&types.Completion{Lines: stage.Lines})
+}
+
+// suppressRejectedCompletionForStage reports whether the stage repeats content
+// the user rejected in this file within the TTL.
 func (e *Engine) suppressRejectedCompletionForStage(stage *text.Stage, manual bool) bool {
 	if manual || stage == nil {
 		return false
 	}
-	entry := e.rejectedCompletionForStage(stage)
-	if entry == nil {
+	candidate := e.rejectedCompletionForStage(stage)
+	if candidate == nil {
 		return false
 	}
-
-	entries := e.pruneRejectedCompletions(entry.filePath)
-	if len(entries) == 0 {
-		return false
+	e.pruneRejections(candidate.filePath)
+	if _, rejected := e.rejectedCompletions[candidate.filePath][candidate.contentHash]; rejected {
+		logSuppressed(SuppressRejectionCache, "")
+		return true
 	}
-
-	for _, cached := range entries {
-		if matched, reason := cached.matches(entry); matched {
-			logger.Debug("rejection cache: suppressed (%d entries, %s)", len(entries), reason)
-			return true
-		}
-	}
-	logger.Debug("rejection cache: allowed (%d entries, no match)", len(entries))
 	return false
 }
 
-// rememberRejectedCompletion caches the current completion so future similar
-// completions are suppressed. Called only when the user explicitly rejects.
+// rememberRejectedCompletion caches the displayed completion so future
+// identical completions are suppressed. Called only when the user rejects.
 func (e *Engine) rememberRejectedCompletion() {
-	candidate := e.display.rejectionCandidate()
+	candidate := e.display.rejectCandidate
 	if candidate == nil {
 		return
 	}
-
-	entry := candidate.clone()
-	entry.expiresAt = e.clock.Now().Add(rejectedCompletionTTL)
-	entries := e.pruneRejectedCompletions(entry.filePath)
-	if len(entries) >= rejectedCompletionMaxPerFile {
-		entries = entries[len(entries)-rejectedCompletionMaxPerFile+1:]
+	file := e.rejectedCompletions[candidate.filePath]
+	if file == nil {
+		file = make(map[uint64]time.Time)
+		e.rejectedCompletions[candidate.filePath] = file
 	}
-	entries = append(entries, entry)
-	e.rejectedCompletions[entry.filePath] = entries
-	e.display.clearRejectionCandidate()
+	e.pruneRejections(candidate.filePath)
+	file[candidate.contentHash] = e.clock.Now().Add(rejectedCompletionTTL)
+	e.display.rejectCandidate = nil
 }
 
-// forgetRejectedCompletions drops the rejection cache for the given file.
-// Called on accept/partial-accept: the user moved forward, any cached
-// entries are now stale (line numbers may have shifted, context changed).
+// forgetRejectedCompletions drops the rejection cache for a file. Called on
+// accept: the user moved forward, cached keys are stale.
 func (e *Engine) forgetRejectedCompletions(filePath string) {
 	if filePath == "" {
 		return
@@ -187,169 +236,28 @@ func (e *Engine) forgetRejectedCompletions(filePath string) {
 	delete(e.rejectedCompletions, filePath)
 }
 
-// rejectedCompletionForStage builds a rejection-cache candidate from a stage.
-// Used for cursor-target-only render paths that did not show ghost text.
-func (e *Engine) rejectedCompletionForStage(stage *text.Stage) *rejectedCompletion {
-	if stage == nil {
-		return nil
+func (e *Engine) pruneRejections(filePath string) {
+	file := e.rejectedCompletions[filePath]
+	if len(file) == 0 {
+		return
 	}
-	return e.rejectedCompletionFor(&types.Completion{
-		StartLine:  stage.BufferStart,
-		EndLineInc: stage.BufferEnd,
-		Lines:      stage.Lines,
-	})
-}
-
-func (e *Engine) rejectedCompletionFor(comp *types.Completion) *rejectedCompletion {
-	if comp == nil {
-		return nil
-	}
-
-	beforeLine, afterLine := surroundingCompletionContext(e.buffer.Lines(), comp.StartLine, comp.EndLineInc)
-	oldLines := currentCompletionOldLines(e.buffer.Lines(), comp.StartLine, comp.EndLineInc)
-
-	// A completion with no new lines and no old lines isn't a real edit; nothing
-	// to compare against later, so don't bother caching it.
-	if len(comp.Lines) == 0 && len(oldLines) == 0 {
-		return nil
-	}
-
-	return &rejectedCompletion{
-		filePath:   e.buffer.Path(),
-		startLine:  comp.StartLine,
-		endLineInc: comp.EndLineInc,
-		beforeLine: beforeLine,
-		afterLine:  afterLine,
-		oldLines:   oldLines,
-		lines:      normalizeCompletionLines(comp.Lines),
-	}
-}
-
-func (e *Engine) pruneRejectedCompletions(filePath string) []*rejectedCompletion {
-	if filePath == "" || e.rejectedCompletions == nil {
-		return nil
-	}
-
 	now := e.clock.Now()
-	entries := e.rejectedCompletions[filePath]
-	if len(entries) == 0 {
-		delete(e.rejectedCompletions, filePath)
-		return nil
-	}
-
-	kept := entries[:0]
-	for _, entry := range entries {
-		if entry != nil && now.Before(entry.expiresAt) {
-			kept = append(kept, entry)
+	for hash, expiresAt := range file {
+		if !now.Before(expiresAt) {
+			delete(file, hash)
 		}
 	}
-	if len(kept) == 0 {
-		delete(e.rejectedCompletions, filePath)
-		return nil
-	}
-	trimmed := append([]*rejectedCompletion(nil), kept...)
-	e.rejectedCompletions[filePath] = trimmed
-	return trimmed
 }
 
-func (r *rejectedCompletion) matches(other *rejectedCompletion) (bool, string) {
-	if r == nil || other == nil {
-		return false, "missing comparison entry"
+// completionContentHash hashes the normalized content of completion lines.
+// Trailing whitespace and trailing blank lines do not change the hash.
+func completionContentHash(lines []string) uint64 {
+	h := fnv.New64a()
+	for _, line := range normalizeCompletionLines(lines) {
+		h.Write([]byte(line))
+		h.Write([]byte{'\n'})
 	}
-	if r.filePath != other.filePath {
-		return false, fmt.Sprintf("file mismatch cached=%s incoming=%s", r.filePath, other.filePath)
-	}
-	if dist := absInt(r.startLine - other.startLine); dist > rejectedCompletionLineProximity {
-		return false, fmt.Sprintf("start line distance %d > %d", dist, rejectedCompletionLineProximity)
-	}
-	beforeSim, beforeOK := contextLineSimilar(r.beforeLine, other.beforeLine)
-	if !beforeOK {
-		return false, fmt.Sprintf("before-line similarity %.2f < %.2f", beforeSim, rejectedCompletionContextThreshold)
-	}
-	afterSim, afterOK := contextLineSimilar(r.afterLine, other.afterLine)
-	if !afterOK {
-		return false, fmt.Sprintf("after-line similarity %.2f < %.2f", afterSim, rejectedCompletionContextThreshold)
-	}
-	oldAvg, oldMin := completionLinesSimilarityStats(r.oldLines, other.oldLines)
-	if oldAvg < rejectedCompletionOldLinesThreshold {
-		return false, fmt.Sprintf("old-lines avg similarity %.2f < %.2f", oldAvg, rejectedCompletionOldLinesThreshold)
-	}
-	if oldMin < rejectedCompletionMinLineSimilarity {
-		return false, fmt.Sprintf("old-lines min line similarity %.2f < %.2f", oldMin, rejectedCompletionMinLineSimilarity)
-	}
-	completionAvg, completionMin := completionLinesSimilarityStats(r.lines, other.lines)
-	if completionAvg < rejectedCompletionSimilarityThreshold {
-		return false, fmt.Sprintf("completion avg similarity %.2f < %.2f", completionAvg, rejectedCompletionSimilarityThreshold)
-	}
-	if completionMin < rejectedCompletionMinLineSimilarity {
-		return false, fmt.Sprintf("completion min line similarity %.2f < %.2f", completionMin, rejectedCompletionMinLineSimilarity)
-	}
-	return true, fmt.Sprintf("before=%.2f after=%.2f old(avg=%.2f,min=%.2f) completion(avg=%.2f,min=%.2f)",
-		beforeSim, afterSim, oldAvg, oldMin, completionAvg, completionMin)
-}
-
-func (r *rejectedCompletion) clone() *rejectedCompletion {
-	if r == nil {
-		return nil
-	}
-	copyOldLines := append([]string(nil), r.oldLines...)
-	copyLines := append([]string(nil), r.lines...)
-	return &rejectedCompletion{
-		filePath:   r.filePath,
-		startLine:  r.startLine,
-		endLineInc: r.endLineInc,
-		beforeLine: r.beforeLine,
-		afterLine:  r.afterLine,
-		oldLines:   copyOldLines,
-		lines:      copyLines,
-		expiresAt:  r.expiresAt,
-	}
-}
-
-// completionLinesSimilarityStats returns both the average and minimum
-// per-line similarity. The minimum guards against a single very-different
-// line being averaged away by surrounding identical lines. The minimum is
-// computed over the overlapping prefix only — trailing positions in the
-// longer slice would always count as 0 similarity and trivially fail the
-// min gate, so length differences are penalized through the average alone
-// (total summed over the overlap, divided by the longer length).
-func completionLinesSimilarityStats(a, b []string) (avg, minSim float64) {
-	if len(a) == 0 && len(b) == 0 {
-		return 1.0, 1.0
-	}
-	if len(a) == 0 || len(b) == 0 {
-		return 0, 0
-	}
-	overlap := min(len(a), len(b))
-	maxLines := max(len(a), len(b))
-
-	total := 0.0
-	minSim = 1.0
-	for i := range overlap {
-		sim := text.LineSimilarity(a[i], b[i])
-		total += sim
-		if sim < minSim {
-			minSim = sim
-		}
-	}
-	return total / float64(maxLines), minSim
-}
-
-// contextLineSimilar reports whether two surrounding-context lines should
-// be treated as the same context. For lines longer than 3 chars after
-// trimming, the strict similarity ratio applies. For shorter lines the
-// ratio is dominated by single-char punctuation differences ("}" vs "};")
-// so the gate is relaxed — the oldLines / completion-lines gates carry the
-// real signal.
-func contextLineSimilar(a, b string) (float64, bool) {
-	sim := text.LineSimilarity(a, b)
-	if sim >= rejectedCompletionContextThreshold {
-		return sim, true
-	}
-	if max(len(a), len(b)) <= 3 {
-		return sim, true
-	}
-	return sim, false
+	return h.Sum64()
 }
 
 func normalizeCompletionLines(lines []string) []string {
@@ -370,39 +278,23 @@ func normalizeCompletionLines(lines []string) []string {
 	return normalized
 }
 
-func currentCompletionOldLines(lines []string, startLine, endLineInc int) []string {
-	if len(lines) == 0 || startLine < 1 || endLineInc < startLine {
-		return nil
+func payloadInt(v any) (int, bool) {
+	switch n := v.(type) {
+	case int:
+		return n, true
+	case int64:
+		return int(n), true
+	case uint64:
+		return int(n), true
+	case float64:
+		return int(n), true
+	default:
+		return 0, false
 	}
-	var oldLines []string
-	for i := startLine; i <= endLineInc && i-1 < len(lines); i++ {
-		oldLines = append(oldLines, lines[i-1])
-	}
-	return normalizeCompletionLines(oldLines)
 }
 
-func surroundingCompletionContext(lines []string, startLine, endLineInc int) (string, string) {
-	if len(lines) == 0 {
-		return "", ""
-	}
-	before := ""
-	if startLine > 1 && startLine-2 < len(lines) {
-		before = strings.TrimSpace(lines[startLine-2])
-	}
-	after := ""
-	if endLineInc >= 0 && endLineInc < len(lines) {
-		after = strings.TrimSpace(lines[endLineInc])
-	}
-	return before, after
-}
-
-func absInt(n int) int {
-	if n < 0 {
-		return -n
-	}
-	return n
-}
-
-func isDeletion(action types.UserActionType) bool {
-	return action == types.ActionDeleteChar || action == types.ActionDeleteSelection
+func payloadPosition(payload map[string]any) (row, col int, ok bool) {
+	row, okRow := payloadInt(payload["row"])
+	col, okCol := payloadInt(payload["col"])
+	return row, col, okRow && okCol
 }

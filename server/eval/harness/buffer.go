@@ -18,12 +18,11 @@ import (
 )
 
 // EvalBuffer implements engine.Buffer for evaluation scenarios.
-// It has no Neovim wiring — everything is in-memory.
+// It has no Neovim wiring, everything is in-memory.
 type EvalBuffer struct {
 	mu sync.Mutex
 
 	path           string
-	version        int
 	lines          []string
 	row            int // 1-indexed
 	col            int // 0-indexed
@@ -44,7 +43,6 @@ func NewEvalBuffer(path string, lines []string, row, col int) *EvalBuffer {
 	cp := slices.Clone(lines)
 	return &EvalBuffer{
 		path:           path,
-		version:        1,
 		lines:          cp,
 		row:            row,
 		col:            col,
@@ -120,13 +118,6 @@ func (b *EvalBuffer) Path() string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.path
-}
-
-// Version implements engine.Buffer.
-func (b *EvalBuffer) Version() int {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.version
 }
 
 // ViewportBounds implements engine.Buffer.
@@ -243,7 +234,9 @@ func (b *EvalBuffer) MoveCursor(line int, center, mark bool) error {
 }
 
 // RegisterEventHandler implements engine.Buffer.
-func (b *EvalBuffer) RegisterEventHandler(handler func(event string)) error { return nil }
+func (b *EvalBuffer) RegisterEventHandler(handler func(event string, payload map[string]any)) error {
+	return nil
+}
 
 // InsertText implements engine.Buffer.
 func (b *EvalBuffer) InsertText(line, col int, txt string, keepUI bool) error {

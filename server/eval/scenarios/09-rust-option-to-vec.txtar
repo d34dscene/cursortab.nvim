@@ -1,4 +1,4 @@
-User widened `fn find(id: u32) -> Option<User>` to `fn find_all(tag: &str) -> Vec<User>`. Caller was `.unwrap()` — that no longer compiles, it needs to iterate. Multi-step: first fix the caller, then fix the body's find logic.
+User widened `fn find(id: u32) -> Option<User>` to `fn find_all(tag: &str) -> Vec<User>`. Caller was `.unwrap()` - that no longer compiles, it needs to iterate. Multi-step: first fix the caller, then fix the body's find logic.
 id: rust-option-to-vec
 language: rust
 file: users.rs

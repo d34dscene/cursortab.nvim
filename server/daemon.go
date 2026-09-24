@@ -6,7 +6,6 @@ import (
 	"io"
 	"net"
 	"os"
-	"path/filepath"
 	"strconv"
 	"sync/atomic"
 	"time"
@@ -16,53 +15,24 @@ import (
 	"cursortab/engine"
 	"cursortab/index"
 	"cursortab/logger"
-	"cursortab/metrics"
 	"cursortab/provider"
-	_ "cursortab/provider/all"
-	"cursortab/provider/copilot"
-	"cursortab/provider/dataset"
-	"cursortab/provider/windsurf"
-	"cursortab/session"
 	"cursortab/types"
 
 	"github.com/neovim/go-client/nvim"
 )
+
+const probeTimeout = 5 * time.Second
 
 type Daemon struct {
 	config      Config
 	provider    engine.Provider
 	buffer      *buffer.NvimBuffer
 	engine      *engine.Engine
-	tracer      *session.Recorder
 	listener    net.Listener
 	pidPath     string
 	clientCount int64
-	shutdown    chan bool
 	ctx         context.Context
 	cancel      context.CancelFunc
-}
-
-// buildNextEditProvider constructs the dual-mode second provider. Only
-// edit-prediction providers make sense for it; the main provider keeps its
-// own job (typically FIM insertion while typing).
-func buildNextEditProvider(cfg *NextEditConfig, base *types.ProviderConfig) (engine.Provider, error) {
-	neCfg := *base
-	if cfg.Model != "" {
-		neCfg.ProviderModel = cfg.Model
-	}
-	if cfg.URL != "" {
-		neCfg.ProviderURL = cfg.URL
-	}
-
-	prov, err := provider.Build(cfg.Type, &neCfg)
-	if err != nil {
-		return nil, fmt.Errorf(
-			"unsupported next_edit.type %q: must be an edit-prediction provider (zeta-2.1, zeta-2, zeta, sweep)", cfg.Type)
-	}
-	if prov.CompletionKind() != engine.CompletionEdit {
-		return nil, fmt.Errorf("next_edit.type %q is not an edit-prediction provider", cfg.Type)
-	}
-	return prov, nil
 }
 
 func newDaemonContext() (context.Context, context.CancelFunc) {
@@ -70,112 +40,57 @@ func newDaemonContext() (context.Context, context.CancelFunc) {
 }
 
 func NewDaemon(config Config) (*Daemon, error) {
-	apiKey := ""
-	if config.Provider.ApiKeyEnv != "" {
-		apiKey = os.Getenv(config.Provider.ApiKeyEnv)
-		if apiKey == "" {
-			logger.Warn("api_key_env is set to %q but environment variable is not defined", config.Provider.ApiKeyEnv)
-		}
-	}
+	daemonCtx, cancel := newDaemonContext()
 
-	providerConfig := &types.ProviderConfig{
-		ProviderURL:         config.Provider.URL,
-		APIKey:              apiKey,
-		ProviderModel:       config.Provider.Model,
-		ProviderTemperature: config.Provider.Temperature,
-		ProviderContextSize: config.Provider.ContextSize,
-		ProviderMaxTokens:   config.Provider.MaxTokens,
-		ProviderTopK:        config.Provider.TopK,
-		ProviderMinP:        config.Provider.MinP,
-		ProviderRepeatPen:   config.Provider.RepeatPenalty,
-		CompletionPath:      config.Provider.CompletionPath,
-		CompletionTimeout:   config.Provider.CompletionTimeout,
-		RetrievalEnabled:    config.Provider.RetrievalEnabled,
-		RetrievalMaxChunks:  config.Provider.RetrievalMaxChunks,
-		Logprobs:            config.Provider.Logprobs,
-		MinConfidence:       config.Provider.MinConfidence,
-		PrivacyMode:         config.Provider.PrivacyMode,
-		Version:             Version,
-		EditorVersion:       config.EditorVersion,
-		EditorOS:            config.EditorOS,
-		StateDir:            config.StateDir,
-		DeviceID:            loadOrCreateDeviceID(config.StateDir),
-	}
-
-	if config.Provider.FIMTokens != nil {
-		providerConfig.FIMTokens = &types.FIMTokenConfig{
-			Prefix:      config.Provider.FIMTokens.Prefix,
-			Suffix:      config.Provider.FIMTokens.Suffix,
-			Middle:      config.Provider.FIMTokens.Middle,
-			RepoName:    config.Provider.FIMTokens.RepoName,
-			FileSep:     config.Provider.FIMTokens.FileSep,
-			Filename:    config.Provider.FIMTokens.Filename,
-			SuffixFirst: config.Provider.FIMTokens.SuffixFirst,
-		}
+	providerConfig, err := buildProviderConfig(daemonCtx, &config)
+	if err != nil {
+		cancel()
+		return nil, err
 	}
 
 	buf := buffer.New(buffer.Config{
 		NsID: config.NsID,
 	})
 
-	var prov engine.Provider
-	switch types.ProviderType(config.Provider.Type) {
-	case types.ProviderTypeCopilot:
-		prov = copilot.NewProvider(buf)
-	case types.ProviderTypeWindsurf:
-		prov = windsurf.NewProvider(buf)
-	default:
-		registered, err := provider.Build(config.Provider.Type, providerConfig)
-		if err != nil {
-			return nil, err
-		}
-		prov = registered
+	prov, err := provider.Build(provider.RoleType, "", providerConfig)
+	if err != nil {
+		cancel()
+		return nil, fmt.Errorf("type provider: %w", err)
 	}
 
-	// Initialize dataset sender if user opted in to contribute data
-	var datasetSender metrics.Sender
-	if config.ContributeData {
-		datasetSender = dataset.NewSender(
-			providerConfig.DeviceID,
-			providerConfig.Version,
-			"", // Default: api.cursortab.com
-		)
-	}
-
-	var nextEditProvider engine.Provider
-	idleCompletionDelay := time.Duration(config.Behavior.IdleCompletionDelay) * time.Millisecond
-	if config.NextEdit != nil && config.NextEdit.Enabled {
-		ne, err := buildNextEditProvider(config.NextEdit, providerConfig)
+	var nextEdit engine.Provider
+	if providerConfig.NextEdit != nil {
+		editConfig := *providerConfig
+		editConfig.Endpoint = *providerConfig.NextEdit
+		editConfig.NextEdit = nil
+		nextEdit, err = provider.Build(provider.RoleEdit, "", &editConfig)
 		if err != nil {
-			return nil, err
+			cancel()
+			return nil, fmt.Errorf("next_edit: %w", err)
 		}
-		nextEditProvider = ne
-		if config.NextEdit.IdleDelay > 0 {
-			idleCompletionDelay = time.Duration(config.NextEdit.IdleDelay) * time.Millisecond
+		if nextEdit.CompletionKind() != engine.CompletionEdit {
+			cancel()
+			return nil, fmt.Errorf("next_edit model %q is not an edit-prediction provider", providerConfig.NextEdit.Model)
 		}
 	}
 
 	var retriever ctx.Retriever
-	if config.Provider.RetrievalEnabled {
+	if providerConfig.RetrievalEnabled {
 		retriever = index.NewManager(index.Options{})
 	}
 
-	var tracer *session.Recorder
-	if config.TraceEnabled {
-		recorder, err := session.NewRecorder(filepath.Join(config.StateDir, "sessions"), nil)
-		if err != nil {
-			logger.Warn("trace recorder disabled: %v", err)
-		} else {
-			tracer = recorder
-			logger.Info("session trace: %s", recorder.Path())
-		}
+	nextEditModel := "-"
+	if providerConfig.NextEdit != nil {
+		nextEditModel = providerConfig.NextEdit.Model
 	}
+	logger.Info("provider ready: type model=%s context_size=%d next_edit=%s",
+		providerConfig.Endpoint.Model, providerConfig.ContextSize, nextEditModel)
 
 	eng, err := engine.NewEngine(prov, buf, engine.EngineConfig{
 		NsID:                config.NsID,
-		ProviderName:        config.Provider.Type,
-		CompletionTimeout:   time.Duration(config.Provider.CompletionTimeout) * time.Millisecond,
-		IdleCompletionDelay: idleCompletionDelay,
+		CompletionTimeout:   time.Duration(providerConfig.Endpoint.TimeoutMs) * time.Millisecond,
+		NextEditTimeout:     nextEditTimeout(providerConfig),
+		IdleCompletionDelay: time.Duration(config.Behavior.IdleCompletionDelay) * time.Millisecond,
 		TextChangeDebounce:  time.Duration(config.Behavior.TextChangeDebounce) * time.Millisecond,
 		CursorPrediction: engine.CursorPredictionConfig{
 			Enabled:            config.Behavior.CursorPrediction.Enabled,
@@ -186,32 +101,136 @@ func NewDaemon(config Config) (*Daemon, error) {
 		MaxVisibleLines:    config.Behavior.MaxVisibleLines,
 		MaxRetrievalChunks: config.Provider.RetrievalMaxChunks,
 		MinConfidence:      config.Provider.MinConfidence,
-		DisabledIn:         config.Behavior.DisabledIn,
 		CompleteInInsert:   config.Behavior.CompleteInInsert,
 		CompleteInNormal:   config.Behavior.CompleteInNormal,
-
-		NextEditProvider:  nextEditProvider,
-		NextEditIdleDelay: idleCompletionDelay,
-		Retriever:         retriever,
-		Trace:             tracer,
-	}, engine.SystemClock, datasetSender)
+		DisabledIn:         config.Behavior.DisabledIn,
+		Retriever:          retriever,
+		NextEditProvider:   nextEdit,
+	}, engine.SystemClock)
 	if err != nil {
+		cancel()
 		return nil, err
 	}
-
-	ctx, cancel := newDaemonContext()
 
 	return &Daemon{
 		config:   config,
 		provider: prov,
 		buffer:   buf,
 		engine:   eng,
-		tracer:   tracer,
 		pidPath:  getPidPath(config.StateDir),
-		shutdown: make(chan bool, 1),
-		ctx:      ctx,
+		ctx:      daemonCtx,
 		cancel:   cancel,
 	}, nil
+}
+
+// buildProviderConfig maps the wire config into the frozen
+// types.ProviderConfig and probes each endpoint once to resolve model ids,
+// context size, and per-model FIM tokens.
+func buildProviderConfig(ctx context.Context, config *Config) (*types.ProviderConfig, error) {
+	wire := config.Provider
+	providerConfig := &types.ProviderConfig{
+		Endpoint: types.EndpointConfig{
+			URL:       wire.Endpoint.URL,
+			APIKey:    wire.Endpoint.APIKey,
+			Model:     wire.Endpoint.Model,
+			MaxTokens: wire.Endpoint.MaxTokens,
+			TimeoutMs: wire.Endpoint.TimeoutMs,
+		},
+		ContextSize:        wire.ContextSize,
+		RetrievalEnabled:   wire.RetrievalEnabled,
+		RetrievalMaxChunks: wire.RetrievalMaxChunks,
+		Logprobs:           wire.Logprobs,
+		MinConfidence:      wire.MinConfidence,
+	}
+	if wire.FIMTokens != nil {
+		providerConfig.FIMTokens = &types.FIMTokenConfig{
+			Prefix:      wire.FIMTokens.Prefix,
+			Suffix:      wire.FIMTokens.Suffix,
+			Middle:      wire.FIMTokens.Middle,
+			RepoName:    wire.FIMTokens.RepoName,
+			FileSep:     wire.FIMTokens.FileSep,
+			Filename:    wire.FIMTokens.Filename,
+			SuffixFirst: wire.FIMTokens.SuffixFirst,
+		}
+	}
+	if wire.NextEdit != nil {
+		providerConfig.NextEdit = &types.EndpointConfig{
+			URL:       wire.NextEdit.URL,
+			APIKey:    wire.NextEdit.APIKey,
+			Model:     wire.NextEdit.Model,
+			MaxTokens: wire.NextEdit.MaxTokens,
+			TimeoutMs: wire.NextEdit.TimeoutMs,
+		}
+	}
+
+	typeRes, err := resolveEndpoint(ctx, &providerConfig.Endpoint, provider.RoleType)
+	if err != nil {
+		return nil, err
+	}
+	if providerConfig.ContextSize == 0 {
+		if typeRes != nil && typeRes.ContextSize > 0 {
+			providerConfig.ContextSize = typeRes.ContextSize
+		} else {
+			providerConfig.ContextSize = defaultContextSize
+		}
+	}
+	if providerConfig.FIMTokens == nil && typeRes != nil {
+		providerConfig.FIMTokens = typeRes.FIMTokens[providerConfig.Endpoint.Model]
+	}
+
+	if providerConfig.NextEdit != nil {
+		editEndpoint := providerConfig.NextEdit
+		var editRes *provider.Resolved
+		if editEndpoint.URL == providerConfig.Endpoint.URL {
+			editRes = typeRes
+		}
+		if editRes == nil {
+			editRes, err = resolveEndpoint(ctx, editEndpoint, provider.RoleEdit)
+			if err != nil {
+				return nil, err
+			}
+		} else if editEndpoint.Model == "" || editEndpoint.Model == "auto" {
+			editEndpoint.Model = provider.ResolveModel(provider.RoleEdit, editRes)
+			if editEndpoint.Model == "" || editEndpoint.Model == "auto" {
+				return nil, fmt.Errorf("no edit model available at %s", editEndpoint.URL)
+			}
+		}
+	}
+
+	return providerConfig, nil
+}
+
+// resolveEndpoint probes one endpoint and resolves its model id for the role.
+// A probe failure is fatal only when the model still needs resolving ("auto"
+// or empty). An explicitly pinned model keeps working with a warning.
+func resolveEndpoint(ctx context.Context, endpoint *types.EndpointConfig, role provider.Role) (*provider.Resolved, error) {
+	probeCtx, cancel := context.WithTimeout(ctx, probeTimeout)
+	defer cancel()
+
+	res, err := provider.Probe(probeCtx, endpoint)
+	if err != nil {
+		pinned := endpoint.Model != "" && endpoint.Model != "auto"
+		if !pinned {
+			return nil, fmt.Errorf("probe %s: cannot resolve model %q: %w", endpoint.URL, endpoint.Model, err)
+		}
+		logger.Warn("probe %s failed, using configured model %q: %v", endpoint.URL, endpoint.Model, err)
+		return nil, nil
+	}
+
+	if endpoint.Model == "" || endpoint.Model == "auto" {
+		endpoint.Model = provider.ResolveModel(role, res)
+		if endpoint.Model == "" || endpoint.Model == "auto" {
+			return nil, fmt.Errorf("no %s model available at %s", role, endpoint.URL)
+		}
+	}
+	return res, nil
+}
+
+func nextEditTimeout(providerConfig *types.ProviderConfig) time.Duration {
+	if providerConfig.NextEdit == nil {
+		return 0
+	}
+	return time.Duration(providerConfig.NextEdit.TimeoutMs) * time.Millisecond
 }
 
 func (d *Daemon) Start() error {
@@ -350,9 +369,6 @@ func (d *Daemon) monitorIdleShutdown() {
 func (d *Daemon) Stop() {
 	d.engine.Stop()
 	d.cancel()
-	if d.tracer != nil {
-		d.tracer.Close()
-	}
 	if d.listener != nil {
 		d.listener.Close()
 	}

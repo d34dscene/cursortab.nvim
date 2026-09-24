@@ -2,7 +2,7 @@
 //
 // chrF (character n-gram F-score, Popović 2015) is the primary quality
 // metric, used by Zed's Zeta evaluation. We compute it on the diff region
-// only — the lines the completion actually touches — which matches their
+// only, the lines the completion actually touches, which matches their
 // "deltaChrF" approach: copy fidelity shouldn't inflate the score.
 package metrics
 
@@ -49,9 +49,9 @@ func ChrFWith(candidate, reference string, nOrder int, beta float64) float64 {
 	}
 	if count == 0 {
 		// Both candidate and reference produced zero n-grams across every
-		// order — most commonly "both are empty strings". We return 100 on
+		// order, most commonly "both are empty strings". We return 100 on
 		// purpose: in edit-prediction, an empty reference means "no edit
-		// expected" and an empty candidate means "no edit produced" — a
+		// expected" and an empty candidate means "no edit produced", a
 		// trivially correct no-op. Returning 0 or NaN here would make a
 		// valid "correctly predicted nothing" case look like a failure.
 		return 100.0
@@ -61,7 +61,7 @@ func ChrFWith(candidate, reference string, nOrder int, beta float64) float64 {
 
 // DeltaChrF computes chrF restricted to the lines that differ between
 // before and the given after. Both before and the two afters must share a
-// common prefix/suffix; we extract only the changed middle and score that.
+// common prefix/suffix. We extract only the changed middle and score that.
 //
 // This is the metric that matters for edit prediction: it ignores any
 // unchanged copy-through text the provider might emit.

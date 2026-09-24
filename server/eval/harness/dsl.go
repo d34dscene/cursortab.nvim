@@ -16,20 +16,15 @@ import (
 //	accept
 //	reject
 //
-// Each step starts in column 0 with the action name. Indented lines are
-// ignored (legacy expect blocks).
+// Each step starts in column 0 with the action name. Anything else is an
+// error.
 func ParseSteps(src string) ([]Step, error) {
 	lines := strings.Split(src, "\n")
 	var steps []Step
 	i := 0
 	for i < len(lines) {
-		raw := lines[i]
-		trimmed := strings.TrimSpace(raw)
+		trimmed := strings.TrimSpace(lines[i])
 		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
-			i++
-			continue
-		}
-		if isIndented(raw) {
 			i++
 			continue
 		}
@@ -75,24 +70,5 @@ func parseStepBlock(lines []string, i int) (Step, int, error) {
 	default:
 		return step, i, fmt.Errorf("unknown action %q", fields[0])
 	}
-	i++
-
-	// Skip any indented lines (legacy expect blocks).
-	for i < len(lines) {
-		line := lines[i]
-		if line == "" {
-			i++
-			break
-		}
-		if !isIndented(line) {
-			break
-		}
-		i++
-	}
-
-	return step, i, nil
-}
-
-func isIndented(line string) bool {
-	return len(line) > 0 && (line[0] == ' ' || line[0] == '\t')
+	return step, i + 1, nil
 }

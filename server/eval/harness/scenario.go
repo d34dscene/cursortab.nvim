@@ -11,6 +11,7 @@ import (
 
 	"cursortab/e2e"
 	"cursortab/eval/cassette"
+	"cursortab/provider"
 
 	"golang.org/x/tools/txtar"
 )
@@ -18,11 +19,11 @@ import (
 // Scenario is a single evaluation fixture loaded from a .txtar file.
 //
 // A scenario runs against one or more Targets. A Target is the tuple
-// (provider_type, model, url) — the thing being evaluated. Target names are
-// arbitrary; the same provider type can appear under multiple names with
+// (dialect, model, url) - the thing being evaluated. Target names are
+// arbitrary. The same dialect can appear under multiple names with
 // different models/URLs, letting you A/B test model versions side-by-side.
 //
-// Targets are defined in harness.DefaultTargets(); scenarios just list
+// Targets are defined in harness.DefaultTargets and scenarios just list
 // which targets they use via the `targets:` header.
 //
 // Cassettes are stored as sidecar files next to the .txtar:
@@ -30,8 +31,8 @@ import (
 //	eval/scenarios/
 //	  12-go-positional-to-options.txtar
 //	  12-go-positional-to-options/
-//	    mercuryapi.ndjson
-//	    copilot.ndjson
+//	    mellum-4b.ndjson
+//	    zeta-2.1.ndjson
 //
 // Fixture layout:
 //
@@ -43,7 +44,7 @@ import (
 //	col: 16
 //	viewportTop: 1
 //	viewportBottom: 20
-//	targets: sweep-next-edit-1.5B, sweep-next-edit-7B, mercuryapi, zeta
+//	targets: mellum-4b, zeta-2.1, sweep-next-edit-v2-7B
 //
 //	-- buffer.txt --
 //	...starting buffer contents...
@@ -55,7 +56,6 @@ import (
 //	new line
 //	-- steps --
 //	request-completion
-//	  expect shown stageCount=1
 //	-- expected --
 //	...the ideal final buffer state used for quality scoring...
 type Scenario struct {
@@ -72,17 +72,17 @@ type Scenario struct {
 	Steps           []Step
 	Expected        []string // ideal final buffer lines (for quality scoring)
 	Cassettes       map[string]*cassette.Cassette
-	CursorPositions [][2]int // extra (row,col) pairs; LoadScenario expands these into separate scenarios
+	CursorPositions [][2]int // extra (row,col) pairs, LoadScenario expands these into separate scenarios
 }
 
-// Target is one evaluation target: a provider type configured with a
-// specific model and URL. Targets have arbitrary names so the same provider
-// type can appear multiple times (e.g. sweep-v1 vs sweep-v2).
+// Target is one evaluation target: a model on the eval server pinned to an
+// explicit dialect so prompts never depend on model auto-detection.
 type Target struct {
-	Name  string // "sweep-v1", "mercuryapi", etc.
-	Type  string // "mercuryapi", "zeta", "zeta-2", "zeta-2.1"
-	Model string // model version id
-	URL   string // provider endpoint; empty = default
+	Name    string        // "mellum-4b", "zeta-2.1", etc.
+	Dialect string        // pinned dialect name, e.g. "fim-mellum"
+	Role    provider.Role // RoleType or RoleEdit, must match the dialect
+	Model   string        // model id sent to the server
+	URL     string        // provider endpoint, empty = default
 }
 
 // TargetNames returns just the names for display/filtering.
@@ -131,10 +131,9 @@ type DiffEntryState struct {
 
 // Step is one action in the scenario's step list.
 type Step struct {
-	Action  StepAction
-	Wait    time.Duration // for ActionWait
-	Manual  bool          // for ActionRequestCompletion: bypass gating
-	Comment string
+	Action StepAction
+	Wait   time.Duration // for ActionWait
+	Manual bool          // for ActionRequestCompletion: bypass gating
 }
 
 // StepAction enumerates what a step does.
@@ -192,7 +191,7 @@ func (sc *Scenario) loadSidecarCassettes() error {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil // no cassettes directory — fine
+			return nil // no cassettes directory, fine
 		}
 		return fmt.Errorf("read cassette dir: %w", err)
 	}
@@ -275,7 +274,9 @@ func ParseScenario(data []byte, targets map[string]Target) (*Scenario, error) {
 	}
 
 	// Resolve targets. When the scenario lists explicit targets, use those.
-	// When omitted, run against every target in the shared map.
+	// When omitted, run against every target in the shared map. Unknown
+	// names resolve to a bare target. The factory rejects them for the
+	// missing dialect instead of guessing one.
 	if len(targetNames) == 0 {
 		for _, t := range targets {
 			sc.Targets = append(sc.Targets, t)
@@ -285,7 +286,7 @@ func ParseScenario(data []byte, targets map[string]Target) (*Scenario, error) {
 			if t, ok := targets[name]; ok {
 				sc.Targets = append(sc.Targets, t)
 			} else {
-				sc.Targets = append(sc.Targets, Target{Name: name, Type: name})
+				sc.Targets = append(sc.Targets, Target{Name: name})
 			}
 		}
 	}
@@ -341,7 +342,7 @@ func ParseScenario(data []byte, targets map[string]Target) (*Scenario, error) {
 	}
 	if len(sc.Targets) == 0 {
 		for name := range sc.Cassettes {
-			sc.Targets = append(sc.Targets, Target{Name: name, Type: name})
+			sc.Targets = append(sc.Targets, Target{Name: name})
 		}
 	}
 	return sc, nil

@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"runtime/debug"
-	"sync/atomic"
 
 	"cursortab/logger"
 	"cursortab/types"
@@ -26,28 +25,17 @@ const (
 	EventPartialAccept     EventType = "partial_accept"
 	EventFileSaved         EventType = "file_saved"
 	EventIdleTimeout       EventType = "idle_timeout"
-	EventNextEditTimeout   EventType = "next_edit_timeout"
 	EventCompletionReady   EventType = "completion_ready"
 	EventCompletionError   EventType = "completion_error"
-	EventPrefetchReady     EventType = "prefetch_ready"
-	EventPrefetchError     EventType = "prefetch_error"
 )
 
 type Event struct {
-	Type      EventType
-	RequestID uint64
-	Manual    bool
-	Response  *types.CompletionResponse
-	Stream    CompletionStream
-	Err       error
-}
-
-func init() {
-	transitionMap = make(map[transitionKey]*Transition)
-	for i := range transitions {
-		t := &transitions[i]
-		transitionMap[transitionKey{from: t.From, event: t.Event}] = t
-	}
+	Type     EventType
+	Payload  map[string]any
+	Gen      uint64
+	Response *types.CompletionResponse
+	Stream   CompletionStream
+	Err      error
 }
 
 // EventTypeFromString returns the EventType for a known event string, or "" if unknown.
@@ -55,7 +43,7 @@ func EventTypeFromString(s string) EventType {
 	switch EventType(s) {
 	case EventEsc, EventTextChanged, EventTextChangeTimeout, EventTrigger,
 		EventCursorMoved, EventInsertEnter, EventInsertLeave, EventAccept,
-		EventPartialAccept, EventFileSaved, EventIdleTimeout, EventNextEditTimeout:
+		EventPartialAccept, EventFileSaved, EventIdleTimeout:
 		return EventType(s)
 	}
 	return ""
@@ -72,7 +60,7 @@ type Transition struct {
 //
 // State Machine:
 //
-//	                    TextChangeTimeout / IdleTimeout
+//	                  TextChangeTimeout / IdleTimeout
 //	  +-------+              +----------+            +-----------+
 //	  | Idle  |------------->| Pending  |----------->| Streaming |
 //	  +-------+              +----------+            +-----------+
@@ -85,22 +73,21 @@ type Transition struct {
 //	      |                       | Tab
 //	      |         +-------------+-------------+
 //	      |         | no cursor target          | has cursor target
-//	      |         v                           v
-//	      |    (prefetch?)               +--------------+
-//	      |         |                    | HasCursorTgt |
-//	      +<--------+                    +--------------+
+//	      v         v                           v
+//	    (idle)  (idle)                   +--------------+
+//	                                     | HasCursorTgt |
+//	                                     +--------------+
 //	                                          | Tab
 //	                                          v
-//	                                     (prefetch?) --> HasCompl. or Pending
+//	                                     HasCompl. or Pending
 //
 //	Rejection (any -> Idle): Esc, InsertLeave, TextChanged mismatch
-//	CursorMoved: resets idle timer (any state)
+//	CursorMoved: resets the pause timer and rejects (any state)
 var transitions = []Transition{
 	// From stateIdle
 	{stateIdle, EventTextChangeTimeout, (*Engine).doRequestCompletion},
 	{stateIdle, EventTrigger, (*Engine).doManualTrigger},
-	{stateIdle, EventIdleTimeout, (*Engine).doRequestIdleCompletion},
-	{stateIdle, EventNextEditTimeout, (*Engine).doRequestIdleCompletion},
+	{stateIdle, EventIdleTimeout, (*Engine).doIdleTimeout},
 	{stateIdle, EventCursorMoved, (*Engine).doResetIdleTimer},
 	{stateIdle, EventInsertEnter, (*Engine).stopIdleTimer},
 	{stateIdle, EventInsertLeave, (*Engine).startIdleTimer},
@@ -123,7 +110,7 @@ var transitions = []Transition{
 	{stateHasCompletion, EventFileSaved, (*Engine).doFileSaved},
 	{stateHasCompletion, EventInsertLeave, (*Engine).doRejectAndStartIdleTimer},
 	{stateHasCompletion, EventCursorMoved, (*Engine).doResetIdleTimer},
-	{stateHasCompletion, EventNextEditTimeout, (*Engine).doNextEditTimeout},
+	{stateHasCompletion, EventIdleTimeout, (*Engine).doIdleTimeout},
 
 	// From stateHasCursorTarget
 	{stateHasCursorTarget, EventAccept, (*Engine).acceptCursorTarget},
@@ -132,6 +119,7 @@ var transitions = []Transition{
 	{stateHasCursorTarget, EventFileSaved, (*Engine).doFileSaved},
 	{stateHasCursorTarget, EventInsertLeave, (*Engine).doRejectAndStartIdleTimer},
 	{stateHasCursorTarget, EventCursorMoved, (*Engine).doResetIdleTimer},
+	{stateHasCursorTarget, EventIdleTimeout, (*Engine).doIdleTimeout},
 
 	// From stateStreamingCompletion
 	{stateStreamingCompletion, EventAccept, (*Engine).doAcceptStreamingCompletion},
@@ -151,62 +139,20 @@ type transitionKey struct {
 	event EventType
 }
 
+func init() {
+	transitionMap = make(map[transitionKey]*Transition)
+	for i := range transitions {
+		t := &transitions[i]
+		transitionMap[transitionKey{from: t.From, event: t.Event}] = t
+	}
+}
+
 // findTransition looks up a valid transition for the given state and event.
 func findTransition(from state, event EventType) *Transition {
 	return transitionMap[transitionKey{from: from, event: event}]
 }
 
-// dispatch finds and executes the appropriate transition for an event.
-func (e *Engine) dispatch(event Event) bool {
-	t := findTransition(e.state, event.Type)
-	if t == nil {
-		return false
-	}
-	if t.Action != nil {
-		t.Action(e)
-	}
-
-	// Post-dispatch: Record user actions for RecentUserActions
-	switch event.Type {
-	case EventTextChanged:
-		e.recordTextChangeAction()
-	case EventCursorMoved:
-		e.recordCursorMovementAction()
-	}
-
-	// Post-dispatch hook: InsertLeave always commits uncommitted user edits
-	if event.Type == EventInsertLeave {
-		e.stopTextChangeTimer()
-		e.syncBuffer()
-		if e.buffer.CommitUserEdits() {
-			e.saveCurrentFileState()
-		}
-	}
-
-	return true
-}
-
-// eventLoopRestarts tracks the number of event loop restarts for panic recovery
-var eventLoopRestarts atomic.Int32
-
-const maxEventLoopRestarts = 3
-
 func (e *Engine) eventLoop(ctx context.Context) {
-	defer func() {
-		if r := recover(); r != nil {
-			restarts := eventLoopRestarts.Add(1)
-			logger.Error("event loop panic [%d/%d]: %v\n%s",
-				restarts, maxEventLoopRestarts, r, debug.Stack())
-
-			if int(restarts) < maxEventLoopRestarts {
-				e.eventLoop(e.mainCtx) // Restart the event loop
-			} else {
-				logger.Error("max event loop restarts reached, stopping engine")
-				go e.Stop() // async to avoid deadlock
-			}
-		}
-	}()
-
 	for {
 		// Get current stream channels (nil when not streaming)
 		e.mu.RLock()
@@ -218,54 +164,92 @@ func (e *Engine) eventLoop(ctx context.Context) {
 			return
 
 		case line, ok := <-linesChan:
-			e.mu.Lock()
-			if e.stopped {
-				e.mu.Unlock()
-				return
-			}
-			if e.streamLinesChan != linesChan {
-				e.mu.Unlock()
-				continue
-			}
-			if !ok {
-				e.handleStreamCompleteSimple()
-				e.mu.Unlock()
-				continue
-			}
-			e.handleStreamLine(line)
-			e.mu.Unlock()
+			e.withEventLock("stream", func() {
+				if e.stopped || e.streamLinesChan != linesChan {
+					return
+				}
+				if !ok {
+					e.handleStreamCompleteSimple()
+					return
+				}
+				e.handleStreamLine(line)
+			})
 
 		case event, ok := <-e.eventChan:
 			if !ok {
 				return
 			}
-
-			e.mu.RLock()
-			stopped := e.stopped
-			e.mu.RUnlock()
-
-			if stopped {
-				return
-			}
-
-			func() {
-				defer func() {
-					if r := recover(); r != nil {
-						logger.Error("event handler panic recovered for event %v: %v", event.Type, r)
-					}
-				}()
+			e.withEventLock(string(event.Type), func() {
 				e.handleEvent(event)
-			}()
+			})
 		}
 	}
 }
 
-func (e *Engine) handleEvent(event Event) {
+// withEventLock runs one loop iteration under the engine mutex. A panic in
+// any branch is logged with its stack and the loop keeps running: only ctx
+// cancellation ends it.
+func (e *Engine) withEventLock(label string, fn func()) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	defer func() {
+		if r := recover(); r != nil {
+			logger.Error("engine panic recovered in %s: %v\n%s", label, r, debug.Stack())
+		}
+	}()
+	fn()
+}
+
+// RegisterEventHandler registers the event handler for nvim RPC callbacks.
+func (e *Engine) RegisterEventHandler() {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
 	if e.stopped {
 		return
+	}
+
+	if err := e.buffer.RegisterEventHandler(func(event string, payload map[string]any) {
+		e.mu.RLock()
+		stopped := e.stopped
+		mainCtx := e.mainCtx
+		e.mu.RUnlock()
+
+		if stopped || mainCtx == nil {
+			return
+		}
+
+		eventType := EventTypeFromString(event)
+		if eventType == "" {
+			return
+		}
+		select {
+		case e.eventChan <- Event{Type: eventType, Payload: payload}:
+		case <-mainCtx.Done():
+		}
+	}); err != nil {
+		logger.Error("error registering event handler for new connection: %v", err)
+	}
+}
+
+func (e *Engine) handleEvent(event Event) {
+	if e.stopped {
+		return
+	}
+
+	// Buffer tick and deletion classification come from the payload before any
+	// handler syncs the mirror.
+	if tick, ok := payloadInt(event.Payload["tick"]); ok {
+		e.bufferTick = uint64(tick)
+	}
+	if event.Type == EventTextChanged {
+		e.updateDeletionStreak(event.Payload)
+	} else if event.Type == EventCursorMoved {
+		// The last action was a movement, not a deletion.
+		e.deletionStreak = 0
+	}
+	if row, col, ok := payloadPosition(event.Payload); ok {
+		e.prevRow, e.prevCol, e.hasCursorPos = row, col, true
 	}
 
 	logger.Debug("handle event: %v (state=%s)", event.Type, e.state)
@@ -281,89 +265,113 @@ func (e *Engine) handleEvent(event Event) {
 		e.inInsertMode = false
 	}
 
-	// Layer 1: Background/async results
+	// Background/async results
 	if e.handleBackgroundEvent(event) {
 		return
 	}
 
-	// Layer 2: Dispatch table for user/timer events
+	// Dispatch table for user/timer events
 	e.dispatch(event)
 
-	// The displayed completion and buffer changed (or are about to): drop the
-	// pause timer and any in-flight next-edit request.
+	// In-flight work for the old display or buffer is invalid now. A full
+	// accept during streaming keeps the request context alive so Finish can
+	// still return the tail: the stream lifecycle releases it. Saving the
+	// file does not invalidate a request: the buffer and its tick are
+	// unchanged by a write to disk.
 	switch event.Type {
-	case EventTextChanged, EventAccept, EventPartialAccept, EventEsc,
-		EventInsertLeave, EventFileSaved:
-		e.cancelNextEdit()
+	case EventTextChanged, EventEsc, EventInsertLeave, EventPartialAccept:
+		e.cancelPending()
+	case EventAccept:
+		if e.streamingState == nil {
+			e.cancelPending()
+		}
 	}
 
-	// Cancel completions when entering a disabled mode
-	// (handles transitions not in the table, e.g. InsertEnter from PendingCompletion)
-	if !e.isModeEnabled(false) && e.state != stateIdle {
+	// Cancel completions when entering a disabled mode (handles transitions
+	// not in the table, e.g. InsertEnter from PendingCompletion)
+	if !e.isModeEnabled() && e.state != stateIdle {
 		e.cancelStreaming()
 		e.reject()
 	}
 }
 
-// handleBackgroundEvent handles async completion and prefetch results.
+// dispatch finds and executes the appropriate transition for an event.
+func (e *Engine) dispatch(event Event) bool {
+	t := findTransition(e.state, event.Type)
+	if t == nil {
+		return false
+	}
+	if t.Action != nil {
+		t.Action(e)
+	}
+
+	// InsertLeave always commits uncommitted user edits and drops the pending
+	// debounce: automatic typing completions stop when leaving insert mode.
+	if event.Type == EventInsertLeave {
+		e.stopTextChangeTimer()
+		e.syncBuffer()
+		if e.buffer.CommitUserEdits() {
+			e.saveCurrentFileState()
+		}
+	}
+
+	return true
+}
+
+// handleBackgroundEvent routes async completion results. Every result is
+// matched against the live request generation: a superseded result is dropped
+// at Debug because a user event already owns the timers.
 func (e *Engine) handleBackgroundEvent(event Event) bool {
 	switch event.Type {
 	case EventCompletionReady:
-		if event.RequestID != 0 && event.RequestID == e.nextEditRequestID {
-			e.handleNextEditReady(event.Response)
-			return true
-		}
-		if event.RequestID == 0 || event.RequestID != e.completionRequestID {
-			return true
-		}
-		if e.state != statePendingCompletion {
-			return true
-		}
-		if !e.isModeEnabled(event.Manual) {
-			e.reject()
+		if e.pending == nil || event.Gen != e.pending.gen {
+			logger.Debug("dropped stale %s (gen %d, want live gen)", event.Type, event.Gen)
 			return true
 		}
 		if event.Stream != nil {
-			e.startCompletionStream(event.Stream, event.Manual)
+			// Streaming keeps the request context alive until Finish: the
+			// pending request stays live so user events can still cancel it.
+			e.startCompletionStream(event.Stream, e.pending.manual)
 			return true
 		}
-		e.handleCompletionReadyImpl(event.Response, event.Manual)
+		pending := e.pending
+		if pending.cancel != nil {
+			pending.cancel()
+		}
+		e.pending = nil
+		e.stopRequestTimers()
+		if pending.role == RoleEdit {
+			e.handleEditReady(event.Response, pending)
+		} else {
+			e.handleTypeReady(event.Response, pending)
+		}
 		return true
 
 	case EventCompletionError:
-		if event.RequestID != 0 && event.RequestID == e.nextEditRequestID {
-			if !errors.Is(event.Err, context.Canceled) {
-				logger.Debug("next-edit request error: %v", event.Err)
-			}
-			e.nextEditRequestID = 0
-			e.nextEditCancel = nil
-			e.nextEditDisplayComp = nil
+		if e.pending == nil || event.Gen != e.pending.gen {
+			logger.Debug("dropped stale %s (gen %d, want live gen)", event.Type, event.Gen)
 			return true
 		}
-		if event.RequestID == 0 || event.RequestID != e.completionRequestID {
+		pending := e.pending
+		if pending.cancel != nil {
+			pending.cancel()
+		}
+		e.pending = nil
+		e.stopRequestTimers()
+		if errors.Is(event.Err, context.Canceled) {
 			return true
 		}
-		if !errors.Is(event.Err, context.Canceled) {
-			logger.Error("completion error: %v", event.Err)
+		if pending.role == RoleEdit {
+			// §6.3: an edit failure never disables the type path and does not
+			// re-arm the edit timer until the next user event.
+			logger.Info("next-edit request failed: %v", event.Err)
+			return true
 		}
+		logger.Error("completion error: %v", event.Err)
 		if e.state == statePendingCompletion {
 			e.state = stateIdle
-			e.cancelCurrentRequest()
 		}
-		return true
-
-	case EventPrefetchReady:
-		if event.RequestID == 0 || event.RequestID != e.currentPrefetchRequestID() {
-			return true
-		}
-		e.handlePrefetchReady(event.Response)
-		return true
-
-	case EventPrefetchError:
-		if event.RequestID == 0 || event.RequestID != e.currentPrefetchRequestID() {
-			return true
-		}
-		e.handlePrefetchError(event.Err)
+		e.startIdleTimer()
 		return true
 	}
 	return false
@@ -372,21 +380,31 @@ func (e *Engine) handleBackgroundEvent(event Event) bool {
 // Action functions for state transitions
 
 func (e *Engine) doRequestCompletion() {
-	e.requestCompletion(types.CompletionSourceTyping, false)
+	e.requestCompletion(SourceTyping, false)
 }
 
 func (e *Engine) doManualTrigger() {
-	e.requestCompletion(types.CompletionSourceTyping, true)
+	e.requestCompletion(SourceTyping, true)
 }
 
-func (e *Engine) doRequestIdleCompletion() {
-	if e.state == stateIdle {
-		e.requestCompletion(types.CompletionSourceIdle, false)
+// doIdleTimeout runs the pause policy: dual mode consults the edit provider
+// when nothing is displayed or the display is untouched, single mode only
+// re-requests when idle so a shown ghost is never replaced in a loop.
+func (e *Engine) doIdleTimeout() {
+	if e.pending != nil {
+		return
 	}
-}
-
-func (e *Engine) doNextEditTimeout() {
-	e.requestNextEditSideChannel()
+	if e.config.NextEditProvider != nil {
+		if e.display.completion != nil && e.display.bufferTick != e.bufferTick {
+			return
+		}
+		e.requestCompletion(SourceIdle, false)
+		return
+	}
+	if e.state != stateIdle {
+		return
+	}
+	e.requestCompletion(SourceIdle, false)
 }
 
 func (e *Engine) doResetIdleTimer() {
@@ -401,19 +419,20 @@ func (e *Engine) doFileSaved() {
 }
 
 func (e *Engine) doTextChangePending() {
-	e.cancelCurrentRequest()
+	e.cancelPending()
 	e.state = stateIdle
-	e.startTextChangeTimer()
+	e.armAfterTextChange()
 }
 
 func (e *Engine) doReject() {
 	e.rejectAndRemember()
 	e.stopIdleTimer()
+	e.stopTextChangeTimer()
 }
 
 func (e *Engine) doRejectAndDebounce() {
 	e.rejectAndRemember()
-	e.startTextChangeTimer()
+	e.armAfterTextChange()
 }
 
 func (e *Engine) doRejectAndStartIdleTimer() {
@@ -434,6 +453,7 @@ func (e *Engine) doRejectStreaming() {
 	e.cancelStreaming()
 	e.rejectAndRemember()
 	e.stopIdleTimer()
+	e.stopTextChangeTimer()
 }
 
 func (e *Engine) cancelStreamAndCheckTyping(cancelFn func()) {
@@ -446,22 +466,22 @@ func (e *Engine) cancelStreamAndCheckTyping(cancelFn func()) {
 	}
 	if matches {
 		e.reject()
-		e.startTextChangeTimer()
+		e.armAfterTextChange()
 		return
 	}
 	e.rejectAndRemember()
-	e.startTextChangeTimer()
+	e.armAfterTextChange()
 }
 
 func (e *Engine) doRejectStreamingAndDebounce() {
-	if e.streamingState != nil && e.display.hasCompletion() {
+	if e.streamingState != nil && e.display.completion != nil {
 		e.cancelStreamAndCheckTyping(e.cancelStreamingKeepPartial)
 		return
 	}
 
 	e.cancelStreaming()
 	e.reject()
-	e.startTextChangeTimer()
+	e.armAfterTextChange()
 }
 
 func (e *Engine) doRejectStreamingAndStartIdleTimer() {
@@ -473,7 +493,7 @@ func (e *Engine) doRejectStreamingAndStartIdleTimer() {
 func (e *Engine) doAcceptStreamingCompletion() {
 	hasStreaming := e.streamingState != nil
 
-	if e.display.hasCompletion() {
+	if e.display.completion != nil {
 		// Mark that we accepted during streaming so handleStreamCompleteSimple
 		// knows to compute cursor prediction from accumulated text
 		if hasStreaming {
@@ -481,12 +501,12 @@ func (e *Engine) doAcceptStreamingCompletion() {
 		}
 		e.state = stateHasCompletion
 		e.acceptCompletion()
-	} else {
-		if hasStreaming {
-			// Keep streaming, will show result when complete
-			e.acceptedDuringStreaming = true
-		} else {
-			e.reject()
-		}
+		return
 	}
+	if hasStreaming {
+		// Keep streaming, will show result when complete
+		e.acceptedDuringStreaming = true
+		return
+	}
+	e.reject()
 }

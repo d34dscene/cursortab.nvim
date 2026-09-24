@@ -1,5 +1,4 @@
 ---@diagnostic disable: undefined-doc-name
-local config = require("cursortab.config")
 local daemon = require("cursortab.daemon")
 local ui = require("cursortab.ui")
 
@@ -21,16 +20,14 @@ end
 ---Check whether the source is enabled.
 ---@return boolean
 function M:enabled()
-	local cfg = config.get()
-	return cfg.blink and cfg.blink.enabled and daemon.is_enabled()
+	return daemon.is_enabled()
 end
 
 ---Return completions based on current append_chars state.
 ---@param _ blink.cmp.Context
 ---@param callback fun(response: blink.cmp.CompletionResponse | nil)
 function M:get_completions(_, callback)
-	local cfg = config.get()
-	if not (cfg.blink and cfg.blink.enabled) or not daemon.is_enabled() then
+	if not daemon.is_enabled() then
 		callback(empty_response)
 		return
 	end

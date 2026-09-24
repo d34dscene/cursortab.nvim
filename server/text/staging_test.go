@@ -6,54 +6,6 @@ import (
 	"testing"
 )
 
-func TestStageDistanceFromCursor(t *testing.T) {
-	// Stage with buffer range 10-15
-	stage := &Stage{
-		BufferStart: 10,
-		BufferEnd:   15,
-	}
-
-	tests := []struct {
-		cursorRow int // buffer coordinates
-		expected  int
-	}{
-		{5, 5},  // cursor before stage (buffer line 5, stage starts at buffer 10)
-		{10, 0}, // cursor at start (buffer line 10)
-		{12, 0}, // cursor inside (buffer line 12)
-		{15, 0}, // cursor at end (buffer line 15)
-		{20, 5}, // cursor after stage (buffer line 20, stage ends at buffer 15)
-	}
-
-	for _, tt := range tests {
-		result := distanceFromCursor(stage.BufferStart, stage.BufferEnd, tt.cursorRow)
-		assert.Equal(t, tt.expected, result, fmt.Sprintf("distance for cursor at %d", tt.cursorRow))
-	}
-}
-
-func TestStageDistanceFromCursor_NoOffset(t *testing.T) {
-	// Stage with buffer range matching coordinates
-	stage := &Stage{
-		BufferStart: 10,
-		BufferEnd:   15,
-	}
-
-	tests := []struct {
-		cursorRow int
-		expected  int
-	}{
-		{5, 5},  // cursor before stage
-		{10, 0}, // cursor at start
-		{12, 0}, // cursor inside
-		{15, 0}, // cursor at end
-		{20, 5}, // cursor after stage
-	}
-
-	for _, tt := range tests {
-		result := distanceFromCursor(stage.BufferStart, stage.BufferEnd, tt.cursorRow)
-		assert.Equal(t, tt.expected, result, fmt.Sprintf("distance for cursor at %d", tt.cursorRow))
-	}
-}
-
 // TestCreateStages_ConsecutiveDeletionsBlankLines verifies that two consecutive
 // blank line deletions result in a single group with both lines, not one dropped.
 func TestCreateStages_ConsecutiveDeletionsBlankLines(t *testing.T) {
@@ -94,7 +46,6 @@ func TestCreateStages_ConsecutiveDeletionsBlankLines(t *testing.T) {
 	assert.Equal(t, 1, len(result.Stages), "1 stage")
 
 	stage := result.Stages[0]
-	assert.Equal(t, 2, len(stage.Changes), "stage has 2 deletion changes")
 	assert.Equal(t, 1, len(stage.Groups), "both consecutive deletions form 1 group")
 
 	group := stage.Groups[0]
@@ -157,7 +108,6 @@ func TestCreateStages_PureDeletionLastStage_CursorTargetLandsAtSurvivingLine(t *
 
 			stage := result.Stages[0]
 			assert.Equal(t, 0, len(stage.Lines), "pure deletion has no new content")
-			assert.True(t, stage.IsLastStage, "single stage is last stage")
 
 			assert.NotNil(t, stage.CursorTarget, "last stage has cursor target")
 			assert.Equal(t, tt.wantTarget, stage.CursorTarget.LineNumber, "cursor target line")
@@ -201,14 +151,8 @@ func TestCreateStages_PureAdditionsPreservesEmptyLines(t *testing.T) {
 
 	stage := result.Stages[0]
 
-	assert.Equal(t, 5, len(stage.Changes), "stage should have 5 changes")
-
-	line3Change, exists := stage.Changes[3]
-	assert.True(t, exists, "should have change at stage line 3")
-	if exists {
-		assert.Equal(t, ChangeAddition, line3Change.Type, "stage line 3 should be addition")
-		assert.Equal(t, "", line3Change.Content, "stage line 3 should be empty string")
-	}
+	assert.Equal(t, 5, len(stage.Lines), "stage should have 5 lines")
+	assert.Equal(t, "", stage.Lines[2], "blank line preserved in stage content")
 
 	totalLinesInGroups := 0
 	for _, g := range stage.Groups {
@@ -258,21 +202,9 @@ func TestCreateStages_MultipleAdditionsWithEmptyLineSeparators(t *testing.T) {
 
 	stage := result.Stages[0]
 
-	assert.Equal(t, 8, len(stage.Changes), "stage should have 8 changes")
-
 	assert.Equal(t, 8, len(stage.Lines), "stage should have 8 lines")
-
-	line3Change, exists := stage.Changes[3]
-	assert.True(t, exists, "should have change at stage line 3")
-	if exists {
-		assert.Equal(t, "", line3Change.Content, "stage line 3 should be empty")
-	}
-
-	line6Change, exists := stage.Changes[6]
-	assert.True(t, exists, "should have change at stage line 6")
-	if exists {
-		assert.Equal(t, "", line6Change.Content, "stage line 6 should be empty")
-	}
+	assert.Equal(t, "", stage.Lines[2], "blank separator preserved at stage line 3")
+	assert.Equal(t, "", stage.Lines[5], "blank separator preserved at stage line 6")
 
 	totalLinesInGroups := 0
 	for _, g := range stage.Groups {
@@ -383,7 +315,6 @@ func TestCreateStages_TwoClusters(t *testing.T) {
 
 	// Last stage should have ShouldRetrigger=true
 	assert.True(t, result.Stages[1].CursorTarget.ShouldRetrigger, "last stage ShouldRetrigger")
-	assert.True(t, result.Stages[1].IsLastStage, "second stage IsLastStage")
 }
 
 func TestCreateStages_CursorDistanceSorting(t *testing.T) {
@@ -620,44 +551,6 @@ func TestCreateStages_GroupsComputed(t *testing.T) {
 	assert.NotNil(t, result.Stages[0].Groups, "first stage groups")
 }
 
-func TestGroupChangesIntoStages(t *testing.T) {
-	diff := &DiffResult{
-		Changes: []LineChange{
-			{Type: ChangeModification, OldLineNum: 5, NewLineNum: 5},
-			{Type: ChangeModification, OldLineNum: 6, NewLineNum: 6},
-			{Type: ChangeModification, OldLineNum: 7, NewLineNum: 7},
-			{Type: ChangeModification, OldLineNum: 20, NewLineNum: 20},
-			{Type: ChangeModification, OldLineNum: 21, NewLineNum: 21},
-		},
-	}
-
-	indexed := []indexedChange{
-		{diff.Changes[0], 5},
-		{diff.Changes[1], 6},
-		{diff.Changes[2], 7},
-		{diff.Changes[3], 20},
-		{diff.Changes[4], 21},
-	}
-	stages := groupChangesIntoStages(indexed, 3, 0, 0, 1, diff)
-
-	assert.Len(t, 2, stages, "stages")
-
-	// First stage: 5-7
-	assert.Equal(t, 5, stages[0].startLine, "first stage start line")
-	assert.Equal(t, 7, stages[0].endLine, "first stage end line")
-	assert.Equal(t, 3, len(stages[0].rawChanges), "first stage change count")
-
-	// Second stage: 20-21
-	assert.Equal(t, 20, stages[1].startLine, "second stage start line")
-	assert.Equal(t, 21, stages[1].endLine, "second stage end line")
-}
-
-func TestGroupChangesIntoStages_EmptyInput(t *testing.T) {
-	stages := groupChangesIntoStages(nil, 3, 0, 0, 1, &DiffResult{})
-
-	assert.Nil(t, stages, "stages for empty input")
-}
-
 func TestCreateStages_WithInsertions(t *testing.T) {
 	// Test staging when completion adds lines (net line increase)
 	// Old: 3 lines, New: 5 lines (2 insertions at different locations)
@@ -831,31 +724,6 @@ func TestGetBufferLine_Modification(t *testing.T) {
 	assert.Equal(t, 11, bufferLine, "buffer line for modification")
 }
 
-func TestGetStageBufferRange_WithInsertions(t *testing.T) {
-	// Stage containing insertions should still compute valid buffer range
-	diff := &DiffResult{
-		Changes: []LineChange{
-			{Type: ChangeAddition, NewLineNum: 2, OldLineNum: -1},
-			{Type: ChangeAddition, NewLineNum: 3, OldLineNum: -1},
-		},
-		LineMapping: &LineMapping{
-			NewToOld: []int{1, -1, -1, 2}, // insertions at lines 2,3
-			OldToNew: []int{1, 4},
-		},
-	}
-
-	stage := &stageBuilder{
-		startLine:  2,
-		endLine:    3,
-		rawChanges: diff.Changes,
-	}
-
-	computeStageRanges(stage, 1, diff)
-
-	// Both insertions anchor to line 1, so range should be 1-1
-	assert.True(t, stage.bufferStart <= stage.bufferEnd, fmt.Sprintf("invalid range: start=%d > end=%d", stage.bufferStart, stage.bufferEnd))
-}
-
 func TestGetBufferLine_DeletionAtLine1(t *testing.T) {
 	// Edge case: deletion at line 1 with no preceding anchor
 	mapping := &LineMapping{
@@ -995,34 +863,6 @@ func TestCreateStages_AllDeletions(t *testing.T) {
 	assert.Len(t, 1, result.Stages, "single cluster of deletions")
 }
 
-func TestGetStageBufferRange_AllInsertions(t *testing.T) {
-	// Stage containing only insertions (all OldLineNum = -1 but have mapping)
-	diff := &DiffResult{
-		Changes: []LineChange{
-			{Type: ChangeAddition, NewLineNum: 2, OldLineNum: -1},
-			{Type: ChangeAddition, NewLineNum: 3, OldLineNum: -1},
-			{Type: ChangeAddition, NewLineNum: 4, OldLineNum: -1},
-		},
-		LineMapping: &LineMapping{
-			NewToOld: []int{1, -1, -1, -1, 2}, // lines 2,3,4 are insertions
-			OldToNew: []int{1, 5},
-		},
-	}
-
-	stage := &stageBuilder{
-		startLine:  2,
-		endLine:    4,
-		rawChanges: diff.Changes,
-	}
-
-	computeStageRanges(stage, 1, diff)
-
-	// Pure additions with valid anchors (from mapping) use insertion point (anchor + 1).
-	// The mapping shows these insertions are anchored to old line 1, so insertion point is 2.
-	assert.True(t, stage.bufferStart <= stage.bufferEnd, fmt.Sprintf("valid range: start=%d end=%d", stage.bufferStart, stage.bufferEnd))
-	assert.Equal(t, 2, stage.bufferStart, "pure additions with mapping anchor: insertion point is anchor + 1")
-}
-
 func TestStageGroups_ShouldNotExceedStageContent(t *testing.T) {
 	// Stage's groups should only reference lines within the stage's content.
 	var changes []LineChange
@@ -1099,67 +939,6 @@ func TestStageGroups_ShouldNotExceedStageContent(t *testing.T) {
 	}
 }
 
-func TestGetStageBufferRange_AdditionsAtEndOfFile(t *testing.T) {
-	// When a stage contains additions that extend beyond the original buffer,
-	// the buffer range should extend to the end of the original buffer.
-
-	// Scenario: 10-line file, modification at line 8, additions at lines 9-12
-	diff := &DiffResult{
-		Changes: []LineChange{
-			{Type: ChangeModification, NewLineNum: 8, OldLineNum: 8, Content: "modified", OldContent: "original"},
-			{Type: ChangeAddition, NewLineNum: 9, OldLineNum: 8, Content: "added1"},
-			{Type: ChangeAddition, NewLineNum: 10, OldLineNum: 8, Content: "added2"},
-			{Type: ChangeAddition, NewLineNum: 11, OldLineNum: 8, Content: "added3"},
-			{Type: ChangeAddition, NewLineNum: 12, OldLineNum: 8, Content: "added4"},
-		},
-		OldLineCount: 10,
-		NewLineCount: 14,
-	}
-
-	stage := &stageBuilder{
-		startLine:  8,
-		endLine:    12,
-		rawChanges: diff.Changes,
-	}
-
-	computeStageRanges(stage, 1, diff)
-
-	assert.Equal(t, 8, stage.bufferStart, "buffer start line")
-	assert.Equal(t, 8, stage.bufferEnd, "buffer end covers modification + addition anchor")
-}
-
-func TestGetStageBufferRange_AdditionsWithinBuffer(t *testing.T) {
-	// When additions don't extend beyond the original buffer,
-	// the buffer range should not be artificially extended.
-
-	// Scenario: 20-line file, additions at lines 5-7 (well within buffer)
-	diff := &DiffResult{
-		Changes: []LineChange{
-			{Type: ChangeAddition, NewLineNum: 5, OldLineNum: 4, Content: "added1"},
-			{Type: ChangeAddition, NewLineNum: 6, OldLineNum: 4, Content: "added2"},
-			{Type: ChangeAddition, NewLineNum: 7, OldLineNum: 4, Content: "added3"},
-		},
-		OldLineCount: 20,
-		NewLineCount: 23,
-		LineMapping: &LineMapping{
-			NewToOld: []int{1, 2, 3, 4, -1, -1, -1, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20},
-			OldToNew: []int{1, 2, 3, 4, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23},
-		},
-	}
-
-	stage := &stageBuilder{
-		startLine:  5,
-		endLine:    7,
-		rawChanges: diff.Changes,
-	}
-
-	computeStageRanges(stage, 1, diff)
-
-	// Pure additions with anchor at line 4: insertion point is anchor + 1 = 5
-	assert.Equal(t, 5, stage.bufferStart, "buffer start line is insertion point (anchor + 1)")
-	assert.Equal(t, 5, stage.bufferEnd, "buffer end line equals start for pure additions")
-}
-
 func TestCreateStages_AdditionsAtEndOfFile(t *testing.T) {
 	// End-to-end test: stage should have correct buffer range when
 	// additions extend beyond the original buffer.
@@ -1230,100 +1009,6 @@ func TestCreateStages_AdditionsAtEndOfFile(t *testing.T) {
 	}
 }
 
-func TestGetStageBufferRange_AdditionsAnchoredBeforeModifications(t *testing.T) {
-	// When modifications exist at line N and additions are anchored to line N-1,
-	// the buffer range should start at the first modification, not the anchor.
-
-	diff := &DiffResult{
-		Changes: []LineChange{
-			// Modifications at lines 43-44 (have OldLineNum)
-			{Type: ChangeModification, NewLineNum: 43, OldLineNum: 43, Content: "mod1", OldContent: "old1"},
-			{Type: ChangeModification, NewLineNum: 44, OldLineNum: 44, Content: "mod2", OldContent: "old2"},
-			// Additions at lines 45-50, anchored to line 42 (line before modification region)
-			{Type: ChangeAddition, NewLineNum: 45, OldLineNum: 42, Content: "added1"},
-			{Type: ChangeAddition, NewLineNum: 46, OldLineNum: 42, Content: "added2"},
-			{Type: ChangeAddition, NewLineNum: 47, OldLineNum: 42, Content: "added3"},
-			{Type: ChangeAddition, NewLineNum: 48, OldLineNum: 42, Content: "added4"},
-			{Type: ChangeAddition, NewLineNum: 49, OldLineNum: 42, Content: "added5"},
-			{Type: ChangeAddition, NewLineNum: 50, OldLineNum: 42, Content: "added6"},
-		},
-		OldLineCount: 44,
-		NewLineCount: 50,
-	}
-
-	stage := &stageBuilder{
-		startLine:  43,
-		endLine:    50,
-		rawChanges: diff.Changes,
-	}
-
-	computeStageRanges(stage, 1, diff)
-
-	// StartLine should be 43 (first modification), NOT 42 (anchor of additions)
-	assert.Equal(t, 43, stage.bufferStart,
-		"buffer start should be 43 (first modification), not 42 (addition anchor)")
-
-	// EndLine should be 44 (end of original buffer)
-	assert.Equal(t, 44, stage.bufferEnd, "buffer end should be 44")
-}
-
-func TestGetStageBufferRange_OnlyAdditionsWithAnchor(t *testing.T) {
-	// When a stage has ONLY additions (no modifications), the insertion point
-	// (anchor + 1) determines the buffer range.
-
-	diff := &DiffResult{
-		Changes: []LineChange{
-			// Only additions, all anchored to line 10
-			{Type: ChangeAddition, NewLineNum: 11, OldLineNum: 10, Content: "added1"},
-			{Type: ChangeAddition, NewLineNum: 12, OldLineNum: 10, Content: "added2"},
-			{Type: ChangeAddition, NewLineNum: 13, OldLineNum: 10, Content: "added3"},
-		},
-		OldLineCount: 15,
-		NewLineCount: 18,
-	}
-
-	stage := &stageBuilder{
-		startLine:  11,
-		endLine:    13,
-		rawChanges: diff.Changes,
-	}
-
-	computeStageRanges(stage, 1, diff)
-
-	// Pure additions with anchor at line 10: insertion point is anchor + 1 = 11
-	assert.Equal(t, 11, stage.bufferStart, "buffer start should be insertion point (anchor + 1)")
-	assert.Equal(t, 11, stage.bufferEnd, "buffer end equals start for pure additions")
-}
-
-func TestGetStageBufferRange_OnlyAdditionsBeyondBuffer(t *testing.T) {
-	// When additions extend beyond the original buffer, the insertion point is still anchor + 1
-
-	diff := &DiffResult{
-		Changes: []LineChange{
-			// Additions beyond original buffer (OldLineCount=10, additions at new lines 11-15)
-			{Type: ChangeAddition, NewLineNum: 11, OldLineNum: 10, Content: "added1"},
-			{Type: ChangeAddition, NewLineNum: 12, OldLineNum: 10, Content: "added2"},
-			{Type: ChangeAddition, NewLineNum: 13, OldLineNum: 10, Content: "added3"},
-			{Type: ChangeAddition, NewLineNum: 14, OldLineNum: 10, Content: "added4"},
-			{Type: ChangeAddition, NewLineNum: 15, OldLineNum: 10, Content: "added5"},
-		},
-		OldLineCount: 10,
-		NewLineCount: 15,
-	}
-
-	stage := &stageBuilder{
-		startLine:  11,
-		endLine:    15,
-		rawChanges: diff.Changes,
-	}
-
-	computeStageRanges(stage, 1, diff)
-
-	// Pure additions with anchor at line 10: insertion point is anchor + 1 = 11
-	assert.Equal(t, 11, stage.bufferStart, "buffer start should be insertion point (anchor + 1)")
-	assert.Equal(t, 11, stage.bufferEnd, "buffer end equals start for pure additions (anchor + 1)")
-}
-
 func TestCreateStages_EmptyNewLines(t *testing.T) {
 	// Edge case: newLines slice is empty but diff has changes
 
@@ -1363,74 +1048,6 @@ func TestCreateStages_EmptyNewLines(t *testing.T) {
 		// Lines will be empty since newLines is empty
 		assert.Equal(t, 0, len(stage.Lines), fmt.Sprintf("stage %d should have empty lines", i))
 	}
-}
-
-func TestStageDistanceFromCursor_CursorAtZero(t *testing.T) {
-	// Edge case: cursor at line 0 (invalid but should handle gracefully)
-
-	stage := &Stage{
-		BufferStart: 5,
-		BufferEnd:   5,
-	}
-
-	// Cursor at line 0
-	distance := distanceFromCursor(stage.BufferStart, stage.BufferEnd, 0)
-
-	// Buffer line for stage is 5, cursor is 0
-	// Distance should be 5 - 0 = 5
-	assert.Equal(t, 5, distance, "distance from cursor 0 to line 5")
-}
-
-func TestGetStageBufferRange_AllAdditionsNoValidAnchor(t *testing.T) {
-	// Edge case: all additions with OldLineNum=0 and no LineMapping
-
-	diff := &DiffResult{
-		Changes: []LineChange{
-			// All additions with no valid anchor (OldLineNum=0, no mapping)
-			{Type: ChangeAddition, NewLineNum: 5, OldLineNum: 0, Content: "added1"},
-			{Type: ChangeAddition, NewLineNum: 6, OldLineNum: 0, Content: "added2"},
-			{Type: ChangeAddition, NewLineNum: 7, OldLineNum: 0, Content: "added3"},
-		},
-		OldLineCount: 10,
-		NewLineCount: 13,
-		LineMapping:  nil, // No mapping available
-	}
-
-	stage := &stageBuilder{
-		startLine:  5,
-		endLine:    7,
-		rawChanges: diff.Changes,
-	}
-
-	computeStageRanges(stage, 1, diff)
-
-	// Anchorless additions with no mapping: falls back to stage start/end lines
-	assert.Equal(t, 5, stage.bufferStart, "should fallback to stage.startLine")
-	assert.Equal(t, 7, stage.bufferEnd, "should fallback to stage.endLine")
-}
-
-func TestGetStageBufferRange_BaseLineOffsetZero(t *testing.T) {
-	// Edge case: baseLineOffset = 0
-
-	diff := &DiffResult{
-		Changes: []LineChange{
-			{Type: ChangeModification, NewLineNum: 5, OldLineNum: 5, Content: "mod", OldContent: "old"},
-		},
-		OldLineCount: 10,
-		NewLineCount: 10,
-	}
-
-	stage := &stageBuilder{
-		startLine:  5,
-		endLine:    5,
-		rawChanges: diff.Changes,
-	}
-
-	computeStageRanges(stage, 0, diff)
-
-	// With baseLineOffset=0: bufferLine = 5 + 0 - 1 = 4
-	assert.Equal(t, 4, stage.bufferStart, "buffer start with offset 0")
-	assert.Equal(t, 4, stage.bufferEnd, "buffer end with offset 0")
 }
 
 func TestCreateStages_PartiallyVisibleSingleCluster_FarFromCursor(t *testing.T) {
@@ -1515,6 +1132,9 @@ func TestCreateStages_PartiallyVisibleSingleCluster_CloseToCursor(t *testing.T) 
 	})
 
 	assert.NotNil(t, result, "should create staging result for partially visible cluster")
+	assert.Equal(t, 2, len(result.Stages), "cluster mods at 48 and 55 split by proximity gap")
+	assert.False(t, result.FirstNeedsNavigation,
+		"FirstNeedsNavigation should be false when cursor is within threshold of first stage")
 }
 
 func TestCreateStages_SingleClusterEntirelyOutsideViewport(t *testing.T) {
@@ -1637,173 +1257,6 @@ func TestCreateStages_NoViewportInfo(t *testing.T) {
 	assert.Equal(t, 10, result.Stages[0].BufferStart, "closer stage first")
 }
 
-func TestGetStageNewLineRangeFromChanges_DerivedFromChanges(t *testing.T) {
-	// New range is derived from changes' NewLineNum values and unchanged old
-	// lines within the buffer range.
-	// Old lines 5-7, where old 6 is deleted → new has lines 5 and 7 (shifted).
-	mapping := &LineMapping{
-		OldToNew: []int{1, 2, 3, 4, -1, 5, 6, 7, 8, 9},
-		NewToOld: []int{1, 2, 3, 4, 6, 7, 8, 9, 10},
-	}
-	stage := &stageBuilder{
-		bufferStart: 5,
-		bufferEnd:   7,
-		rawChanges: []LineChange{
-			{Type: ChangeModification, OldLineNum: 5, NewLineNum: 5},
-			{Type: ChangeDeletion, OldLineNum: 6, NewLineNum: -1},
-			{Type: ChangeModification, OldLineNum: 7, NewLineNum: 6},
-		},
-	}
-	// Changes have NewLineNum 5 and 6 (ignoring deletion).
-	// Unchanged old lines: old 5 maps to 4 (outside range check uses OldToNew
-	// but old 5 is OldToNew[4]=-1, old 6 is OldToNew[5]=5, old 7 is OldToNew[6]=6).
-	// Combined: newStart=5, newEnd=6
-	diff := &DiffResult{LineMapping: mapping, Changes: stage.rawChanges}
-	computeStageRanges(stage, 1, diff)
-	assert.Equal(t, 5, stage.newLineStart, "newStart")
-	assert.Equal(t, 6, stage.newLineEnd, "newEnd")
-}
-
-func TestFinalizeStages_SingleDeletion(t *testing.T) {
-	// Edge case: stage with only deletions (no new content)
-
-	diff := &DiffResult{
-		Changes: []LineChange{
-			{Type: ChangeDeletion, NewLineNum: 0, OldLineNum: 5, OldContent: "deleted"},
-		},
-		OldLineCount: 10,
-		NewLineCount: 9,
-	}
-
-	b := &stageBuilder{
-		startLine:  5,
-		endLine:    5,
-		rawChanges: diff.Changes,
-	}
-	computeStageRanges(b, 1, diff)
-
-	newLines := []string{"1", "2", "3", "4", "6", "7", "8", "9", "10"} // Line 5 deleted
-
-	stages := finalizeStages([]*stageBuilder{b}, newLines, nil, "test.go", 1, diff, 1, 0, 0)
-
-	assert.Equal(t, 1, len(stages), "should have 1 stage")
-	// For deletions, lines might be empty or contain surrounding context
-	// The important thing is it doesn't panic
-	assert.NotNil(t, stages[0], "stage should not be nil")
-}
-
-// TestStageCoordinates_ModificationHasCorrectMapping verifies that modifications
-// in a stage have correct coordinate mapping for rendering.
-func TestStageCoordinates_ModificationHasCorrectMapping(t *testing.T) {
-	// Create a diff with a modification
-	diff := &DiffResult{
-		Changes: []LineChange{
-			{Type: ChangeModification, NewLineNum: 2, OldLineNum: 2, Content: "new line 2", OldContent: "old line 2"},
-		},
-		OldLineCount: 5,
-		NewLineCount: 5,
-	}
-
-	newLines := []string{"line1", "new line 2", "line3", "line4", "line5"}
-	oldLines := []string{"line1", "old line 2", "line3", "line4", "line5"}
-
-	result := CreateStages(&StagingParams{
-		Diff:               diff,
-		CursorRow:          2,
-		CursorCol:          0,
-		ViewportTop:        1,
-		ViewportBottom:     50,
-		BaseLineOffset:     1,
-		ProximityThreshold: 3,
-		MaxLines:           0,
-		FilePath:           "test.go",
-		NewLines:           newLines,
-		OldLines:           oldLines,
-	})
-
-	assert.NotNil(t, result, "result")
-	assert.True(t, len(result.Stages) >= 1, "should have at least 1 stage")
-
-	stage := result.Stages[0]
-	assert.True(t, len(stage.Changes) > 0, "stage should have changes")
-
-	// Verify the change has correct NewLineNum
-	for _, change := range stage.Changes {
-		if change.Type == ChangeModification {
-			assert.True(t, change.NewLineNum > 0, "modification should have NewLineNum > 0")
-		}
-	}
-}
-
-// TestStageCoordinates_AdditionMapping verifies that additions have correct coordinate mapping.
-func TestStageCoordinates_AdditionMapping(t *testing.T) {
-	diff := &DiffResult{
-		Changes: []LineChange{
-			{Type: ChangeAddition, NewLineNum: 2, OldLineNum: 1, Content: "added line"},
-		},
-		OldLineCount: 3,
-		NewLineCount: 4,
-		LineMapping: &LineMapping{
-			NewToOld: []int{1, -1, 2, 3},
-			OldToNew: []int{1, 3, 4},
-		},
-	}
-
-	newLines := []string{"line1", "added line", "line2", "line3"}
-	oldLines := []string{"line1", "line2", "line3"}
-
-	result := CreateStages(&StagingParams{
-		Diff:               diff,
-		CursorRow:          1,
-		CursorCol:          0,
-		ViewportTop:        1,
-		ViewportBottom:     50,
-		BaseLineOffset:     1,
-		ProximityThreshold: 3,
-		MaxLines:           0,
-		FilePath:           "test.go",
-		NewLines:           newLines,
-		OldLines:           oldLines,
-	})
-
-	assert.NotNil(t, result, "result")
-	assert.True(t, len(result.Stages) >= 1, "should have at least 1 stage")
-}
-
-// TestSingleLineToMultipleLinesAllIncluded verifies that when one old line becomes
-// multiple new lines, all the new lines are included in the stage.
-func TestSingleLineToMultipleLinesAllIncluded(t *testing.T) {
-	// Scenario: one whitespace line becomes three content lines
-	oldText := `        {
-
-        }`
-	newText := `        {
-            "timestamp": "2022-01-04T01:00:00Z",
-            "value": 260,
-            "name": "John"
-        }`
-
-	diffResult := ComputeDiff(oldText, newText)
-
-	// We should have changes for new lines 2, 3, 4 (the three content lines)
-	assert.True(t, len(diffResult.Changes) >= 2,
-		fmt.Sprintf("Expected at least 2 changes, got %d", len(diffResult.Changes)))
-
-	// Verify that additions from a delete+insert block stay together for staging
-	var additionOldLineNums []int
-	for _, change := range diffResult.Changes {
-		if change.Type == ChangeAddition {
-			additionOldLineNums = append(additionOldLineNums, change.OldLineNum)
-		}
-	}
-
-	// All additions should have the same anchor (OldLineNum)
-	for i := 1; i < len(additionOldLineNums); i++ {
-		assert.Equal(t, additionOldLineNums[0], additionOldLineNums[i],
-			"All additions in a delete+insert block should have the same OldLineNum anchor")
-	}
-}
-
 // TestStageIncludesAllLinesFromDeleteInsertBlock verifies that when creating stages
 // from a diff where one line becomes multiple lines, all the new lines are included.
 func TestStageIncludesAllLinesFromDeleteInsertBlock(t *testing.T) {
@@ -1847,71 +1300,6 @@ func TestStageIncludesAllLinesFromDeleteInsertBlock(t *testing.T) {
 		}
 		assert.True(t, totalLinesInGroups >= 2,
 			fmt.Sprintf("Groups should cover at least 2 lines, got %d", totalLinesInGroups))
-	}
-}
-
-// TestMixedChangesCoordinates verifies that a mix of modifications and additions
-// have correct coordinate mappings.
-func TestMixedChangesCoordinates(t *testing.T) {
-	// Simulate: 5 old lines replaced by 8 new lines
-	diff := &DiffResult{
-		Changes: []LineChange{
-			{Type: ChangeModification, NewLineNum: 4, OldLineNum: 4, Content: "MODIFIED line 4", OldContent: "line 4"},
-			{Type: ChangeAddition, NewLineNum: 5, OldLineNum: 4, Content: "ADDED line 5"},
-			{Type: ChangeAddition, NewLineNum: 6, OldLineNum: 4, Content: "ADDED line 6"},
-			{Type: ChangeAddition, NewLineNum: 7, OldLineNum: 4, Content: "ADDED line 7"},
-			{Type: ChangeAddition, NewLineNum: 8, OldLineNum: 4, Content: "ADDED line 8"},
-		},
-		OldLineCount: 5,
-		NewLineCount: 8,
-	}
-
-	newLines := []string{
-		"unchanged1",
-		"unchanged2",
-		"unchanged3",
-		"MODIFIED line 4",
-		"ADDED line 5",
-		"ADDED line 6",
-		"ADDED line 7",
-		"ADDED line 8",
-	}
-	oldLines := []string{
-		"unchanged1",
-		"unchanged2",
-		"unchanged3",
-		"line 4",
-		"line 5",
-	}
-
-	result := CreateStages(&StagingParams{
-		Diff:               diff,
-		CursorRow:          4,
-		CursorCol:          0,
-		ViewportTop:        1,
-		ViewportBottom:     50,
-		BaseLineOffset:     1,
-		ProximityThreshold: 3,
-		MaxLines:           0,
-		FilePath:           "test.go",
-		NewLines:           newLines,
-		OldLines:           oldLines,
-	})
-
-	assert.NotNil(t, result, "result")
-	assert.True(t, len(result.Stages) >= 1, "should have at least 1 stage")
-
-	// Find the stage with changes
-	stage := result.Stages[0]
-
-	// Should have changes
-	assert.True(t, len(stage.Changes) > 0, "stage should have changes")
-
-	// Check that modification has OldLineNum
-	for _, change := range stage.Changes {
-		if change.Type == ChangeModification {
-			assert.True(t, change.OldLineNum > 0, "modification should have OldLineNum > 0")
-		}
 	}
 }
 
@@ -2372,44 +1760,6 @@ func TestCreateStages_PureAdditionsGroupBufferLineConsistency(t *testing.T) {
 	for _, g := range stage.Groups {
 		assert.Equal(t, stage.BufferStart, g.BufferLine,
 			"group BufferLine should match stage BufferStart for pure additions")
-	}
-}
-
-// TestGetStageBufferRange_PureAdditionsBufferLineMapping verifies that
-// the bufferLines map is populated with correct insertion points for pure additions.
-func TestGetStageBufferRange_PureAdditionsBufferLineMapping(t *testing.T) {
-	// For pure additions with valid anchors, the bufferLines map should contain
-	// insertion points (anchor + 1), not anchor positions.
-	diff := &DiffResult{
-		Changes: []LineChange{
-			{Type: ChangeAddition, NewLineNum: 1, OldLineNum: 3, Content: "added"},
-		},
-		OldLineCount: 3,
-		NewLineCount: 4,
-		LineMapping: &LineMapping{
-			NewToOld: []int{1, 2, 3, -1},
-			OldToNew: []int{1, 2, 3},
-		},
-	}
-
-	stage := &stageBuilder{
-		startLine:  1,
-		endLine:    1,
-		rawChanges: diff.Changes,
-	}
-
-	baseLineOffset := 4
-
-	computeStageRanges(stage, baseLineOffset, diff)
-
-	// Stage buffer range should be at insertion point
-	assert.True(t, stage.bufferStart == stage.bufferEnd, "pure additions have start == end")
-
-	// Buffer lines for each change should match the stage range
-	for _, change := range diff.Changes {
-		bufLine := diff.LineMapping.GetBufferLine(change, baseLineOffset)
-		assert.Equal(t, stage.bufferStart, bufLine,
-			"buffer lines should match stage range for pure additions")
 	}
 }
 

@@ -6,62 +6,6 @@ import (
 	"testing"
 )
 
-func TestIncrementalDiffBuilder_BasicModification(t *testing.T) {
-	oldLines := []string{"hello world", "foo bar", "baz qux"}
-	builder := NewIncrementalDiffBuilder(oldLines)
-
-	// Add lines that match/modify the old lines
-	change1 := builder.AddLine("hello world") // exact match
-	assert.Nil(t, change1, "expected no change for exact match")
-
-	change2 := builder.AddLine("foo baz") // no exact match → addition during streaming
-	assert.NotNil(t, change2, "expected change for non-matching line")
-	assert.Equal(t, ChangeAddition, change2.Type, "non-matching lines are additions during streaming")
-
-	change3 := builder.AddLine("baz qux") // exact match
-	assert.Nil(t, change3, "expected no change for exact match")
-
-	// Verify final state
-	assert.Equal(t, 1, len(builder.Changes), "change count")
-}
-
-func TestIncrementalDiffBuilder_Addition(t *testing.T) {
-	// During streaming, incremental matching uses similarity to find matches.
-	// Lines that don't match are recorded as additions. The actual change
-	// types are determined at stage finalization using batch diff.
-	oldLines := []string{"line 1", "line 2"}
-	builder := NewIncrementalDiffBuilder(oldLines)
-
-	builder.AddLine("line 1")   // match
-	builder.AddLine("new line") // no match found during streaming -> addition
-	builder.AddLine("line 2")   // matches old "line 2"
-
-	// During streaming: 1 addition ("new line")
-	// Note: actual change types are refined at stage finalization
-	assert.Equal(t, 1, len(builder.Changes), "change count")
-
-	// Verify the addition
-	assert.Equal(t, 1, len(builder.Changes), "should have 1 change")
-	change2 := builder.Changes[0]
-	assert.Equal(t, ChangeAddition, change2.Type, "expected addition during streaming")
-	assert.Equal(t, "new line", change2.Content, "added content")
-}
-
-func TestIncrementalDiffBuilder_MultipleAdditions(t *testing.T) {
-	// During streaming, lines that don't match are recorded as additions.
-	// The actual change types are determined at stage finalization using batch diff.
-	oldLines := []string{"a", "b"}
-	builder := NewIncrementalDiffBuilder(oldLines)
-
-	builder.AddLine("a") // match
-	builder.AddLine("x") // no match -> addition during streaming
-	builder.AddLine("y") // no match -> addition during streaming
-	builder.AddLine("b") // matches old "b"
-
-	// During streaming: 2 additions ("x", "y")
-	assert.Equal(t, 2, len(builder.Changes), "change count")
-}
-
 func TestIncrementalStageBuilder_SingleStage(t *testing.T) {
 	oldLines := []string{"line 1", "line 2", "line 3"}
 	builder := NewIncrementalStageBuilder(
@@ -88,7 +32,7 @@ func TestIncrementalStageBuilder_SingleStage(t *testing.T) {
 	assert.Equal(t, 1, len(result.Stages), "stage count")
 
 	stage := result.Stages[0]
-	assert.Equal(t, 2, len(stage.Changes), "changes in stage")
+	assert.Equal(t, []string{"line 1 modified", "line 2 modified"}, stage.Lines, "stage content")
 }
 
 func TestIncrementalStageBuilder_MultipleStages(t *testing.T) {
@@ -182,26 +126,6 @@ func TestIncrementalStageBuilder_StageFinalizationOnGap(t *testing.T) {
 	assert.True(t, len(result.Stages) > 0, "should have at least one stage")
 }
 
-func TestIncrementalDiffBuilder_NonMatchingLineIsAddition(t *testing.T) {
-	oldLines := []string{
-		"func hello() {",
-		"    return world",
-		"}",
-	}
-	builder := NewIncrementalDiffBuilder(oldLines)
-
-	change1 := builder.AddLine("func hello() {") // exact match
-	assert.Nil(t, change1, "expected exact match")
-
-	// With exact-only matching, similar but non-identical lines are additions
-	change2 := builder.AddLine("    return world + 1")
-	assert.NotNil(t, change2, "expected change for non-matching line")
-	assert.Equal(t, ChangeAddition, change2.Type, "non-matching line is addition during streaming")
-
-	change3 := builder.AddLine("}") // exact match
-	assert.Nil(t, change3, "expected exact match for closing brace")
-}
-
 func TestIncrementalStageBuilder_ViewportBoundary(t *testing.T) {
 	// Use more distinct line content to avoid similarity matching issues
 	oldLines := []string{
@@ -251,14 +175,6 @@ func TestIncrementalStageBuilder_ViewportBoundary(t *testing.T) {
 	// so they should be grouped into a single stage regardless of viewport.
 	// Viewport boundaries should not split logically connected changes.
 	assert.Equal(t, 1, len(result.Stages), "all nearby changes should be in one stage")
-}
-
-func TestIncrementalDiffBuilder_EmptyOldLines(t *testing.T) {
-	builder := NewIncrementalDiffBuilder([]string{})
-
-	change := builder.AddLine("new content")
-	assert.NotNil(t, change, "expected addition change")
-	assert.Equal(t, ChangeAddition, change.Type, "change type")
 }
 
 // TestIncrementalStageBuilder_BaseLineOffset verifies that BufferStart/BufferEnd
@@ -317,8 +233,7 @@ func TestIncrementalStageBuilder_BaseLineOffset(t *testing.T) {
 	assert.Equal(t, expectedStart, stage.BufferStart, "BufferStart")
 	assert.Equal(t, expectedEnd, stage.BufferEnd, "BufferEnd")
 
-	// Verify changes exist
-	assert.Equal(t, 2, len(stage.Changes), "change count")
+	assert.Equal(t, 2, len(stage.Groups), "two modification groups")
 }
 
 // TestIncrementalStageBuilder_BaseLineOffsetWithGap tests that gap detection
@@ -430,9 +345,9 @@ func TestIncrementalStageBuilder_GapDetectionWithSimilarityMatching(t *testing.T
 	// changes should be split into separate stages
 	assert.True(t, len(result.Stages) >= 3, "expected at least 3 stages")
 
-	// Verify each stage has changes
+	// Verify each stage has rendered content
 	for _, stage := range result.Stages {
-		assert.True(t, len(stage.Changes) > 0, "stage should have changes")
+		assert.True(t, len(stage.Groups) > 0, "stage should have groups")
 	}
 }
 
@@ -485,224 +400,6 @@ func TestIncrementalStageBuilder_GapDetectionBehavior(t *testing.T) {
 	// Since BOTH new-line gap (4) and buffer-line gap (5) exceed threshold (2),
 	// we expect 2 stages regardless of which gap metric is used.
 	assert.Equal(t, 2, len(result.Stages), "stage count")
-}
-
-// TestIncrementalDiffBuilder_SearchWindowConstraint verifies that matching is
-// constrained to the search window and doesn't match far-away lines.
-func TestIncrementalDiffBuilder_SearchWindowConstraint(t *testing.T) {
-	// Simulate the scenario from the logs:
-	// - 98 old lines (full file)
-	// - Model outputs something, and first line matches to old line 41
-	//
-	// Old line 0: "import { Hono } from \"hono\";"
-	// Old line 40: "export { WorkflowRuntimeEntrypoint... }"
-	// Old line 41: empty or comment
-	//
-	// If model line 1 is "import apiKeyRoutes...", it should match within [0, 10),
-	// NOT to line 41.
-
-	oldLines := make([]string, 98)
-	// Fill with realistic content
-	oldLines[0] = "import { Hono } from \"hono\";"
-	oldLines[1] = ""
-	oldLines[2] = "import auth from \"./auth\";"
-	oldLines[3] = "import { ApiContext } from \"./context\";"
-	for i := 4; i < 40; i++ {
-		oldLines[i] = "import something from \"./something\";"
-	}
-	oldLines[40] = "// Export comment"
-	oldLines[41] = "export { WorkflowRuntimeEntrypoint as Runtime } from \"./runtime\";"
-	oldLines[42] = ""
-	oldLines[43] = "// Initialize app"
-	oldLines[44] = "const application = new Hono<ApiContext>();"
-	for i := 45; i < 98; i++ {
-		oldLines[i] = "app.route(\"/path\", handler);"
-	}
-
-	builder := NewIncrementalDiffBuilder(oldLines)
-
-	// Model outputs "import apiKeyRoutes..." as first line
-	// This should match within [0, 10), NOT to line 41
-	modelLine1 := "import apiKeyRoutes from \"./routes/api-keys\";"
-	change1 := builder.AddLine(modelLine1)
-
-	// Check where it matched
-	assert.True(t, len(builder.LineMapping.NewToOld) > 0, "line mapping should be populated")
-
-	matchedOldLine := builder.LineMapping.NewToOld[0] // 1-indexed old line number
-
-	// The search window for first line is [0, 10)
-	// Matches should be constrained to this window
-	assert.True(t, matchedOldLine <= 10, "first model line should match within search window")
-
-	// Check the recorded change
-	if change1 != nil {
-		assert.True(t, change1.OldLineNum <= 10, "change OldLineNum should be within search window")
-	}
-}
-
-// TestIncrementalDiffBuilder_SearchWindowRespected verifies the search window bounds
-func TestIncrementalDiffBuilder_SearchWindowRespected(t *testing.T) {
-	// Create old lines where exact match exists ONLY outside the search window
-	oldLines := make([]string, 50)
-	for i := range 50 {
-		oldLines[i] = "generic line"
-	}
-	// Put a unique line at position 30 (outside initial search window [0, 10))
-	oldLines[30] = "unique content at line 31"
-
-	builder := NewIncrementalDiffBuilder(oldLines)
-
-	// Try to match the unique line as FIRST model line
-	// It should NOT match because it's outside [0, 10)
-	builder.AddLine("unique content at line 31")
-
-	matchedOldLine := builder.LineMapping.NewToOld[0]
-
-	// Should either:
-	// 1. Match to something in [0, 10) via similarity
-	// 2. Or be recorded as addition (matchedOldLine == 0)
-	// Should NOT match to line 31 (outside search window)
-	assert.NotEqual(t, 31, matchedOldLine, "should not match to line 31")
-}
-
-// TestIncrementalDiffBuilder_OutOfOrderOutput verifies behavior when model output
-// contains lines in a different order than the original file.
-func TestIncrementalDiffBuilder_OutOfOrderOutput(t *testing.T) {
-	oldLines := []string{
-		"func first() {}",
-		"func second() {}",
-		"func third() {}",
-		"func fourth() {}",
-		"func fifth() {}",
-	}
-
-	builder := NewIncrementalDiffBuilder(oldLines)
-
-	// Output line 4 first (out of order)
-	builder.AddLine("func fourth() {}")
-	firstMatch := builder.LineMapping.NewToOld[0]
-
-	// Should match to line 4 within search window [0, 10)
-	assert.Equal(t, 4, firstMatch, "first match should be to line 4")
-
-	// Output duplicate of line 4
-	builder.AddLine("func fourth() {}")
-	secondMatch := builder.LineMapping.NewToOld[1]
-
-	// usedOldLines should prevent duplicate matching
-	assert.True(t, secondMatch != firstMatch || firstMatch == 0, "duplicate line should not match same old line twice")
-}
-
-// TestIncrementalDiffBuilder_SearchWindowBounds tests that matching is constrained
-// to a sliding search window.
-func TestIncrementalDiffBuilder_SearchWindowBounds(t *testing.T) {
-	tests := []struct {
-		name           string
-		oldLineCount   int
-		startPosition  int
-		uniquePosition int
-		expectMatch    bool
-	}{
-		{
-			name:           "unique line within window",
-			oldLineCount:   50,
-			startPosition:  0,
-			uniquePosition: 5,
-			expectMatch:    true,
-		},
-		{
-			name:           "unique line outside window",
-			oldLineCount:   50,
-			startPosition:  0,
-			uniquePosition: 30,
-			expectMatch:    false,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			oldLines := make([]string, tt.oldLineCount)
-			for i := range oldLines {
-				oldLines[i] = "generic content"
-			}
-			// Put unique content at specific position
-			oldLines[tt.uniquePosition] = "unique_content_here"
-
-			builder := NewIncrementalDiffBuilder(oldLines)
-			builder.oldLineIdx = tt.startPosition
-
-			builder.AddLine("unique_content_here")
-			matched := builder.LineMapping.NewToOld[0]
-
-			if tt.expectMatch {
-				expectedLine := tt.uniquePosition + 1 // 1-indexed
-				assert.Equal(t, expectedLine, matched, "should match at expected line")
-			} else {
-				// Should not match to the unique position (outside window)
-				assert.NotEqual(t, tt.uniquePosition+1, matched, "should not match outside search window")
-			}
-		})
-	}
-}
-
-// TestIncrementalDiffBuilder_LongFileWithManyExactMatches tests incremental
-// diff building on a large file where most lines match exactly.
-func TestIncrementalDiffBuilder_LongFileWithManyExactMatches(t *testing.T) {
-	// Large file (50 lines) where first 40 lines match exactly,
-	// then changes start occurring
-	oldLines := make([]string, 50)
-	for i := range 40 {
-		oldLines[i] = "func line" + string(rune('A'+i%26)) + "() {}"
-	}
-	oldLines[40] = "// Comment"
-	oldLines[41] = ""
-	for i := 42; i < 50; i++ {
-		oldLines[i] = "func other" + string(rune('A'+i%26)) + "() {}"
-	}
-
-	builder := NewIncrementalDiffBuilder(oldLines)
-
-	// Model outputs exact same content for first 40 lines
-	for i := range 40 {
-		change := builder.AddLine(oldLines[i])
-		assert.Nil(t, change, "line should be exact match")
-	}
-
-	// oldLineIdx should have advanced to 40
-	assert.Equal(t, 40, builder.oldLineIdx, "oldLineIdx")
-
-	// Now model outputs something different
-	change := builder.AddLine("func completely_new() {}")
-	assert.NotNil(t, change, "expected change for non-matching line")
-}
-
-// TestIncrementalDiffBuilder_MatchingWhenModelSkipsLines tests what happens when
-// model output is out of order or skips lines.
-func TestIncrementalDiffBuilder_MatchingWhenModelSkipsLines(t *testing.T) {
-	oldLines := []string{
-		"func first() {}",
-		"func second() {}",
-		"func third() {}",
-		"func fourth() {}",
-		"func fifth() {}",
-	}
-
-	builder := NewIncrementalDiffBuilder(oldLines)
-
-	// Output line 4 first (skipping lines 1-3)
-	builder.AddLine("func fourth() {}")
-	matched1 := builder.LineMapping.NewToOld[0]
-
-	assert.Equal(t, 4, matched1, "first match should be to line 4")
-
-	// Output line 1 - but search window has moved past it
-	builder.AddLine("func first() {}")
-	matched2 := builder.LineMapping.NewToOld[1]
-
-	// Line 1 is outside the new search window after matching line 4
-	// Should not match to line 1
-	assert.NotEqual(t, 1, matched2, "should not match to line 1")
 }
 
 // TestIncrementalStageBuilder_WhenModelOutputStartsMidFile tests when model
@@ -810,69 +507,6 @@ func TestLineSimilarity(t *testing.T) {
 	}
 }
 
-// TestIncrementalDiffBuilder_LargeFile tests incremental diff building with a large file.
-func TestIncrementalDiffBuilder_LargeFile(t *testing.T) {
-	// Create a large file with distinct sections
-	oldLines := make([]string, 50)
-	for i := range 20 {
-		oldLines[i] = "func section1_line" + string(rune('A'+i)) + "() {}"
-	}
-	oldLines[20] = ""
-	for i := 21; i < 40; i++ {
-		oldLines[i] = "func section2_line" + string(rune('A'+i-21)) + "() {}"
-	}
-	oldLines[40] = ""
-	for i := 41; i < 50; i++ {
-		oldLines[i] = "func section3_line" + string(rune('A'+i-41)) + "() {}"
-	}
-
-	builder := NewIncrementalDiffBuilder(oldLines)
-
-	// Process exact matches for first 20 lines
-	for i := range 20 {
-		change := builder.AddLine(oldLines[i])
-		assert.Nil(t, change, "line should be exact match")
-	}
-
-	// oldLineIdx should have advanced
-	assert.Equal(t, 20, builder.oldLineIdx, "oldLineIdx")
-
-	// Add a new line that doesn't exist in the original
-	// Since oldLines[20] is "", and we're adding non-empty content at the expected position,
-	// the empty line will be matched and filled (append_chars)
-	change := builder.AddLine("func new_function() {}")
-	assert.NotNil(t, change, "expected change for new line")
-
-	// Should be recorded as append_chars (filling empty line), addition, or modification
-	assert.True(t, change.Type == ChangeAddition || change.Type == ChangeModification ||
-		change.Type == ChangeReplaceChars || change.Type == ChangeAppendChars,
-		"expected valid change type")
-}
-
-// TestIncrementalDiffBuilder_DuplicateLinesPrevented verifies that the same old line
-// cannot be matched twice (usedOldLines tracking).
-func TestIncrementalDiffBuilder_DuplicateLinesPrevented(t *testing.T) {
-	oldLines := []string{
-		"func alpha() {}",
-		"func beta() {}",
-		"func gamma() {}",
-	}
-
-	builder := NewIncrementalDiffBuilder(oldLines)
-
-	// Match line 1
-	builder.AddLine("func alpha() {}")
-	firstMatch := builder.LineMapping.NewToOld[0]
-	assert.Equal(t, 1, firstMatch, "first line should match old line 1")
-
-	// Try to match line 1 again (duplicate in model output)
-	builder.AddLine("func alpha() {}")
-	secondMatch := builder.LineMapping.NewToOld[1]
-
-	// Should NOT match to line 1 again
-	assert.NotEqual(t, 1, secondMatch, "duplicate model line should not match same old line twice")
-}
-
 // TestIncrementalStageBuilder_DuplicateOutputHandling verifies stage building
 // when model outputs duplicate lines.
 func TestIncrementalStageBuilder_DuplicateOutputHandling(t *testing.T) {
@@ -963,46 +597,7 @@ func TestIncrementalStageBuilder_ConsistencyWithComputeDiff(t *testing.T) {
 		incStage := incResult.Stages[i]
 		assert.Equal(t, batchStage.BufferStart, incStage.BufferStart, "BufferStart")
 		assert.Equal(t, batchStage.BufferEnd, incStage.BufferEnd, "BufferEnd")
-		assert.Equal(t, len(batchStage.Changes), len(incStage.Changes), "change count")
-	}
-}
-
-// TestIncrementalDiffBuilder_AllLinesIdentical verifies no changes when all lines match.
-func TestIncrementalDiffBuilder_AllLinesIdentical(t *testing.T) {
-	oldLines := []string{"line1", "line2", "line3", "line4", "line5"}
-	builder := NewIncrementalDiffBuilder(oldLines)
-
-	for _, line := range oldLines {
-		change := builder.AddLine(line)
-		assert.Nil(t, change, "expected no change for identical line")
-	}
-
-	assert.Equal(t, 0, len(builder.Changes), "change count")
-}
-
-// TestIncrementalDiffBuilder_AllLinesModified verifies all lines are detected as modified.
-func TestIncrementalDiffBuilder_AllLinesModified(t *testing.T) {
-	oldLines := []string{"old1", "old2", "old3"}
-	builder := NewIncrementalDiffBuilder(oldLines)
-
-	newLines := []string{"new1", "new2", "new3"}
-	for _, line := range newLines {
-		builder.AddLine(line)
-	}
-
-	// All lines should have changes
-	assert.Equal(t, 3, len(builder.Changes), "change count")
-}
-
-// TestIncrementalDiffBuilder_WhitespaceOnlyLines tests handling of whitespace-only lines.
-func TestIncrementalDiffBuilder_WhitespaceOnlyLines(t *testing.T) {
-	oldLines := []string{"", "   ", "\t", "content"}
-	builder := NewIncrementalDiffBuilder(oldLines)
-
-	// Exact matches
-	for _, line := range oldLines {
-		change := builder.AddLine(line)
-		assert.Nil(t, change, "expected no change for whitespace match")
+		assert.Equal(t, ToLuaFormat(batchStage, batchStage.BufferStart), ToLuaFormat(incStage, incStage.BufferStart), "ToLuaFormat output")
 	}
 }
 
@@ -1053,26 +648,6 @@ func TestIncrementalStageBuilder_SingleLine(t *testing.T) {
 	assert.NotNil(t, result, "expected staging result")
 
 	assert.Equal(t, 1, len(result.Stages), "stage count")
-}
-
-// TestIncrementalDiffBuilder_VeryLongLines tests handling of very long lines.
-func TestIncrementalDiffBuilder_VeryLongLines(t *testing.T) {
-	longLine := ""
-	for range 1000 {
-		longLine += "x"
-	}
-
-	oldLines := []string{longLine}
-	builder := NewIncrementalDiffBuilder(oldLines)
-
-	// Exact match
-	change := builder.AddLine(longLine)
-	assert.Nil(t, change, "expected no change for identical long line")
-
-	// Slight modification
-	builder2 := NewIncrementalDiffBuilder(oldLines)
-	change = builder2.AddLine(longLine + "y")
-	assert.NotNil(t, change, "expected change for modified long line")
 }
 
 // TestIncrementalStageBuilder_LargeGap verifies stage splitting with large gaps.
@@ -1140,29 +715,7 @@ func TestIncrementalStageBuilder_ConsecutiveModifications(t *testing.T) {
 
 	// All consecutive modifications should be in one stage
 	assert.Equal(t, 1, len(result.Stages), "stage count")
-
-	if len(result.Stages) > 0 {
-		assert.Equal(t, 3, len(result.Stages[0].Changes), "changes in stage")
-	}
-}
-
-// TestIncrementalDiffBuilder_SpecialCharacters tests handling of special characters.
-func TestIncrementalDiffBuilder_SpecialCharacters(t *testing.T) {
-	oldLines := []string{
-		"line with 'quotes'",
-		"line with \"double quotes\"",
-		"line with `backticks`",
-		"line with special: !@#$%^&*()",
-		"line with unicode: 日本語",
-	}
-
-	builder := NewIncrementalDiffBuilder(oldLines)
-
-	// Exact matches should work
-	for _, line := range oldLines {
-		change := builder.AddLine(line)
-		assert.Nil(t, change, "expected no change for line with special chars")
-	}
+	assert.Equal(t, []string{"B_modified", "C_modified", "D_modified"}, result.Stages[0].Lines, "stage content")
 }
 
 // TestIncrementalStageBuilder_LowSimilarityReplacement verifies that when we replace
@@ -1200,14 +753,14 @@ func TestIncrementalStageBuilder_LowSimilarityReplacement(t *testing.T) {
 	assert.Equal(t, 1, len(result.Stages), "stage count")
 
 	stage := result.Stages[0]
-	assert.Equal(t, 1, len(stage.Changes), "change count")
 
-	// The change should be a modification (not addition) because equal line counts
-	change, ok := stage.Changes[1] // Line 1 relative to stage
-	assert.True(t, ok, "should have change")
-	assert.Equal(t, ChangeModification, change.Type, "expected modification")
-	assert.Equal(t, "this commt adress", change.OldContent, "old content")
-	assert.Equal(t, newContent, change.Content, "new content")
+	// Equal line counts categorize the typo fix as a modification, not an addition
+	assert.Equal(t, []string{newContent}, stage.Lines, "stage content")
+	assert.Len(t, 1, stage.Groups, "group count")
+	group := stage.Groups[0]
+	assert.Equal(t, "modification", group.Type, "group type")
+	assert.Equal(t, []string{"this commt adress"}, group.OldLines, "old content")
+	assert.Equal(t, []string{newContent}, group.Lines, "new content")
 }
 
 // TestIncrementalStageBuilder_AppendCharsWithAdditionsBelow verifies that when
@@ -1236,20 +789,14 @@ func TestIncrementalStageBuilder_AppendCharsWithAdditionsBelow(t *testing.T) {
 
 	stage := result.Stages[0]
 
-	// First line: append_chars (prefix completion)
-	change1, ok := stage.Changes[1]
-	assert.True(t, ok, "should have change at line 1")
-	assert.Equal(t, ChangeAppendChars, change1.Type, "line 1 should be append_chars")
-	assert.Equal(t, "partial", change1.OldContent, "old content")
+	assert.Equal(t, []string{"partial content completed", "new line 1", "new line 2"}, stage.Lines, "stage content")
 
-	// Lines 2-3: additions
-	change2, ok := stage.Changes[2]
-	assert.True(t, ok, "should have change at line 2")
-	assert.Equal(t, ChangeAddition, change2.Type, "line 2 should be addition")
-
-	change3, ok := stage.Changes[3]
-	assert.True(t, ok, "should have change at line 3")
-	assert.Equal(t, ChangeAddition, change3.Type, "line 3 should be addition")
+	assert.Len(t, 2, stage.Groups, "group count")
+	assert.Equal(t, "modification", stage.Groups[0].Type, "first group type")
+	assert.Equal(t, "append_chars", stage.Groups[0].RenderHint, "first group hint")
+	assert.Equal(t, []string{"partial"}, stage.Groups[0].OldLines, "first group old content")
+	assert.Equal(t, "addition", stage.Groups[1].Type, "second group type")
+	assert.Equal(t, []string{"new line 1", "new line 2"}, stage.Groups[1].Lines, "second group content")
 }
 
 // TestIncrementalStageBuilder_AdditionsAboveWithAppendChars verifies that when
@@ -1279,20 +826,14 @@ func TestIncrementalStageBuilder_AdditionsAboveWithAppendChars(t *testing.T) {
 
 	stage := result.Stages[0]
 
-	// Lines 1-2: additions (inserted above)
-	change1, ok := stage.Changes[1]
-	assert.True(t, ok, "should have change at line 1")
-	assert.Equal(t, ChangeAddition, change1.Type, "line 1 should be addition")
+	assert.Equal(t, []string{"inserted line 1", "inserted line 2", "partial content completed"}, stage.Lines, "stage content")
 
-	change2, ok := stage.Changes[2]
-	assert.True(t, ok, "should have change at line 2")
-	assert.Equal(t, ChangeAddition, change2.Type, "line 2 should be addition")
-
-	// Line 3: append_chars (the completed partial line)
-	change3, ok := stage.Changes[3]
-	assert.True(t, ok, "should have change at line 3")
-	assert.Equal(t, ChangeAppendChars, change3.Type, "line 3 should be append_chars")
-	assert.Equal(t, "partial", change3.OldContent, "old content preserved")
+	assert.Len(t, 2, stage.Groups, "group count")
+	assert.Equal(t, "addition", stage.Groups[0].Type, "first group type")
+	assert.Equal(t, []string{"inserted line 1", "inserted line 2"}, stage.Groups[0].Lines, "first group content")
+	assert.Equal(t, "modification", stage.Groups[1].Type, "second group type")
+	assert.Equal(t, "append_chars", stage.Groups[1].RenderHint, "second group hint")
+	assert.Equal(t, []string{"partial"}, stage.Groups[1].OldLines, "second group old content")
 }
 
 // TestIncrementalStageBuilder_AdditionsAboveAndBelowWithAppendChars verifies
@@ -1323,29 +864,16 @@ func TestIncrementalStageBuilder_AdditionsAboveAndBelowWithAppendChars(t *testin
 
 	stage := result.Stages[0]
 
-	// Lines 1-2: additions above
-	change1, ok := stage.Changes[1]
-	assert.True(t, ok, "should have change at line 1")
-	assert.Equal(t, ChangeAddition, change1.Type, "line 1 should be addition")
+	assert.Equal(t, []string{"above 1", "above 2", "middle completed", "below 1", "below 2"}, stage.Lines, "stage content")
 
-	change2, ok := stage.Changes[2]
-	assert.True(t, ok, "should have change at line 2")
-	assert.Equal(t, ChangeAddition, change2.Type, "line 2 should be addition")
-
-	// Line 3: append_chars (the completed line)
-	change3, ok := stage.Changes[3]
-	assert.True(t, ok, "should have change at line 3")
-	assert.Equal(t, ChangeAppendChars, change3.Type, "line 3 should be append_chars")
-	assert.Equal(t, "middle", change3.OldContent, "old content preserved")
-
-	// Lines 4-5: additions below
-	change4, ok := stage.Changes[4]
-	assert.True(t, ok, "should have change at line 4")
-	assert.Equal(t, ChangeAddition, change4.Type, "line 4 should be addition")
-
-	change5, ok := stage.Changes[5]
-	assert.True(t, ok, "should have change at line 5")
-	assert.Equal(t, ChangeAddition, change5.Type, "line 5 should be addition")
+	assert.Len(t, 3, stage.Groups, "group count")
+	assert.Equal(t, "addition", stage.Groups[0].Type, "first group type")
+	assert.Equal(t, []string{"above 1", "above 2"}, stage.Groups[0].Lines, "first group content")
+	assert.Equal(t, "modification", stage.Groups[1].Type, "middle group type")
+	assert.Equal(t, "append_chars", stage.Groups[1].RenderHint, "middle group hint")
+	assert.Equal(t, []string{"middle"}, stage.Groups[1].OldLines, "middle group old content")
+	assert.Equal(t, "addition", stage.Groups[2].Type, "last group type")
+	assert.Equal(t, []string{"below 1", "below 2"}, stage.Groups[2].Lines, "last group content")
 }
 
 // TestIncrementalStageBuilder_MaxVisibleLines tests that maxVisibleLines correctly
@@ -1521,28 +1049,16 @@ func TestIncrementalStageBuilder_BlankLineAdditions(t *testing.T) {
 
 	stage := result.Stages[0]
 
-	// Verify all 7 lines (from line 3 onwards) are in the stage
-	assert.Equal(t, 7, len(stage.Lines), "stage should have 7 lines")
-
-	// Verify blank lines are included in changes
-	// Line 1 (relative): "func test1() {}" - append_chars
-	// Line 2 (relative): "    body1" - addition
-	// Line 3 (relative): "" - addition (BLANK LINE)
-	// Line 4 (relative): "func test2() {}" - addition
-	// Line 5 (relative): "    body2" - addition
-	// Line 6 (relative): "" - addition (BLANK LINE)
-	// Line 7 (relative): "func test3() {}" - addition
-
-	// Check that blank lines at relative positions 3 and 6 are additions
-	change3, ok := stage.Changes[3]
-	assert.True(t, ok, "should have change at relative line 3 (blank line)")
-	assert.Equal(t, ChangeAddition, change3.Type, "blank line should be addition")
-	assert.Equal(t, "", change3.Content, "blank line content should be empty")
-
-	change6, ok := stage.Changes[6]
-	assert.True(t, ok, "should have change at relative line 6 (blank line)")
-	assert.Equal(t, ChangeAddition, change6.Type, "blank line should be addition")
-	assert.Equal(t, "", change6.Content, "blank line content should be empty")
+	// All 7 lines from the append onward are in the stage, blank lines included
+	assert.Equal(t, []string{
+		"func test1() {}",
+		"    body1",
+		"",
+		"func test2() {}",
+		"    body2",
+		"",
+		"func test3() {}",
+	}, stage.Lines, "stage content including blank lines")
 
 	// Verify groups include all lines (no gaps)
 	totalLinesInGroups := 0
@@ -1579,17 +1095,13 @@ func TestIncrementalStageBuilder_EmptyLineFilledWithContent(t *testing.T) {
 
 	stage := result.Stages[0]
 
-	// First change should be append_chars (filling empty line)
-	change1, ok := stage.Changes[1]
-	assert.True(t, ok, "should have change at relative line 1")
-	assert.Equal(t, ChangeAppendChars, change1.Type, "change type")
-
-	// First group should be modification with append_chars hint
+	// First group fills the empty line: modification with append_chars hint
 	assert.True(t, len(stage.Groups) >= 1, "should have at least 1 group")
 	firstGroup := stage.Groups[0]
 	assert.Equal(t, "modification", firstGroup.Type, "group type")
 	assert.Equal(t, "append_chars", firstGroup.RenderHint, "render hint")
 	assert.Equal(t, 3, firstGroup.BufferLine, "buffer line")
+	assert.Equal(t, []string{""}, firstGroup.OldLines, "old content is the empty line")
 }
 
 // TestIncrementalStageBuilder_WhitespaceOnlyLineModification verifies that when the old line
@@ -2285,142 +1797,6 @@ func TestIncrementalStageBuilder_MaxVisibleLinesSplitNoSpuriousDeletions(t *test
 		}
 	}
 	assert.Equal(t, 8, totalModifications, "all 8 changed routes should appear as modifications")
-}
-
-// TestIncrementalStageBuilder_DuplicateLinesAcrossFunctions tests that when
-// filling in a function body with lines identical to another function,
-// MaxVisibleLines staging produces correct results that apply back to the
-// expected new content.
-func TestIncrementalStageBuilder_DuplicateLinesAcrossFunctions(t *testing.T) {
-	oldLines := []string{
-		"void ecg_lowpass(const double *x, double *y, size_t n, int N) {",
-		"    assert(n >= (size_t)(2 * N) && \"Not enough samples\");",
-		"",
-		"    for (size_t i = 0; i < n; ++i) {",
-		"        double y1 = (i >= 1) ? y[i - 1] : 0.0;",
-		"        double y2 = (i >= 2) ? y[i - 2] : 0.0;",
-		"        double xN = (i >= (size_t)N) ? x[i - N] : 0.0;",
-		"        double x2N = (i >= (size_t)2 * N) ? x[i - 2 * N] : 0.0;",
-		"        y[i] = 2 * y1 - y2 + x[i] - 2 * xN + x2N;",
-		"    }",
-		"}",
-		"",
-		"void ecg_highpass(const double *x, double *y, size_t n, int N) {",
-		"    ",
-		"}",
-	}
-
-	newLines := []string{
-		"void ecg_lowpass(const double *x, double *y, size_t n, int N) {",
-		"    assert(n >= (size_t)(2 * N) && \"Not enough samples\");",
-		"",
-		"    for (size_t i = 0; i < n; ++i) {",
-		"        double y1 = (i >= 1) ? y[i - 1] : 0.0;",
-		"        double y2 = (i >= 2) ? y[i - 2] : 0.0;",
-		"        double xN = (i >= (size_t)N) ? x[i - N] : 0.0;",
-		"        double x2N = (i >= (size_t)2 * N) ? x[i - 2 * N] : 0.0;",
-		"        y[i] = 2 * y1 - y2 + x[i] - 2 * xN + x2N;",
-		"    }",
-		"}",
-		"",
-		"void ecg_highpass(const double *x, double *y, size_t n, int N) {",
-		"    assert(n >= (size_t)(2 * N) && \"Not enough samples\");",
-		"",
-		"    for (size_t i = 0; i < n; ++i) {",
-		"        double y1 = (i >= 1) ? y[i - 1] : 0.0;",
-		"        double y2 = (i >= 2) ? y[i - 2] : 0.0;",
-		"        double xN = (i >= (size_t)N) ? x[i - N] : 0.0;",
-		"        double x2N = (i >= (size_t)2 * N) ? x[i - 2 * N] : 0.0;",
-		"        y[i] = x[i] - 2 * y1 + y2 - 2 * xN + x2N;",
-		"    }",
-		"}",
-	}
-
-	for _, maxVisibleLines := range []int{0, 1, 2, 3, 4, 5, 6, 7, 8, 1000} {
-		t.Run(fmt.Sprintf("MaxVisibleLines=%d", maxVisibleLines), func(t *testing.T) {
-			builder := NewIncrementalStageBuilder(
-				oldLines,
-				1,  // baseLineOffset
-				10, // proximityThreshold
-				maxVisibleLines,
-				1,  // viewportTop
-				50, // viewportBottom
-				14, // cursorRow (on the "    " line inside ecg_highpass)
-				4,  // cursorCol
-				"test.c",
-				0, // availableWidth
-			)
-
-			var streamStageCount int
-			for _, line := range newLines {
-				if stage := builder.AddLine(line); stage != nil {
-					streamStageCount++
-				}
-			}
-
-			// At most 1 stage should be finalized during streaming
-			if streamStageCount > 1 {
-				t.Errorf("expected at most 1 streamed stage, got %d", streamStageCount)
-			}
-
-			// Finalize (batch pipeline) produces all stages correctly
-			result := builder.Finalize()
-			if result == nil || len(result.Stages) == 0 {
-				t.Fatal("expected at least one stage from Finalize")
-			}
-
-			// Apply all finalized stages to old content and verify
-			buf := &testBuffer{lines: append([]string{}, oldLines...)}
-			stages := copyStages(result.Stages)
-			for i := range stages {
-				buf.applyStage(stages[i])
-				advanceOffsets(stages, i)
-			}
-
-			if !slicesEqual(buf.lines, newLines) {
-				t.Errorf("apply result mismatch (incremental, maxVisibleLines=%d, %d stages):\n  got:  %v\n  want: %v",
-					maxVisibleLines, len(result.Stages), buf.lines, newLines)
-			}
-		})
-	}
-
-	// Also verify the batch pipeline with MaxLines
-	oldText := JoinLines(oldLines)
-	newText := JoinLines(newLines)
-	for _, maxLines := range []int{0, 1, 2, 3, 4, 5, 6, 7, 8, 1000} {
-		t.Run(fmt.Sprintf("Batch_MaxLines=%d", maxLines), func(t *testing.T) {
-			diff := ComputeDiff(oldText, newText)
-			result := CreateStages(&StagingParams{
-				Diff:               diff,
-				CursorRow:          14,
-				CursorCol:          4,
-				ViewportTop:        1,
-				ViewportBottom:     50,
-				BaseLineOffset:     1,
-				ProximityThreshold: 10,
-				MaxLines:           maxLines,
-				NewLines:           newLines,
-				OldLines:           oldLines,
-				FilePath:           "test.c",
-			})
-
-			if result == nil || len(result.Stages) == 0 {
-				t.Fatal("expected at least one stage")
-			}
-
-			buf := &testBuffer{lines: append([]string{}, oldLines...)}
-			stages := copyStages(result.Stages)
-			for i := range stages {
-				buf.applyStage(stages[i])
-				advanceOffsets(stages, i)
-			}
-
-			if !slicesEqual(buf.lines, newLines) {
-				t.Errorf("apply result mismatch (batch, maxLines=%d, %d stages):\n  got:  %v\n  want: %v",
-					maxLines, len(result.Stages), buf.lines, newLines)
-			}
-		})
-	}
 }
 
 // TestIncrementalStageBuilder_PartialLineModificationDuringStreaming tests that when

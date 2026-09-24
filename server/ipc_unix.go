@@ -29,14 +29,6 @@ func cleanupIPC(stateDir string) {
 	os.Remove(getIPCAddress(stateDir))
 }
 
-func isProcessRunning(pid int) bool {
-	p, err := os.FindProcess(pid)
-	if err != nil {
-		return false
-	}
-	return p.Signal(syscall.Signal(0)) == nil
-}
-
 func setupShutdownHandler(onShutdown func()) {
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)

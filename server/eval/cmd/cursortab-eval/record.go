@@ -16,7 +16,7 @@ func recordCmd(args []string) error {
 	fs := flag.NewFlagSet("record", flag.ContinueOnError)
 	var (
 		dir         = fs.String("scenarios", "eval/scenarios", "directory of .txtar scenario fixtures")
-		targetFlag  = fs.String("target", "", "target name to record (required; matches scenarios' target list)")
+		targetFlag  = fs.String("target", "", "target name to record (required, matches scenarios' target list)")
 		scenario    = fs.String("scenario", "", "scenario id filter (empty = all)")
 		onlyMissing = fs.Bool("missing", false, "only record scenarios that don't yet have a cassette for this target")
 		apiURL      = fs.String("url", "", "provider API url (overrides the target's URL)")
@@ -38,10 +38,6 @@ func recordCmd(args []string) error {
 	if key == "" {
 		key = os.Getenv("CURSORTAB_EVAL_API_KEY")
 	}
-	if key == "" && !*dry {
-		return fmt.Errorf("no API key: pass --api-key or set CURSORTAB_EVAL_API_KEY")
-	}
-
 	scenarios, err := loadScenarios(*dir)
 	if err != nil {
 		return err
@@ -84,7 +80,7 @@ func recordCmd(args []string) error {
 			TargetFilter: []string{targetName},
 			Mode:         harness.ModeRecord,
 			Transport:    http.DefaultTransport,
-			BaseConfig:   &types.ProviderConfig{APIKey: key},
+			BaseConfig:   &types.ProviderConfig{Endpoint: types.EndpointConfig{APIKey: key}},
 		})
 		sc.Targets = saved
 

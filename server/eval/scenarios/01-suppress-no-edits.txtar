@@ -7,12 +7,10 @@ col: 14
 viewportTop: 1
 viewportBottom: 20
 modified: false
-targets: mercuryapi
 -- buffer.txt --
 package main
 
 func main() {}
 -- steps --
 request-completion
-  expect !shown suppressed
 

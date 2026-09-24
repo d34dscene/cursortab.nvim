@@ -6,7 +6,7 @@ local M = {}
 function M.check()
 	local cfg = config.get()
 	local daemon_status = daemon.check_daemon_status()
-	local channel_status = daemon.get_channel_status()
+	local connection = daemon.get_connection_status()
 
 	-- Identity
 	vim.health.start("Identity")
@@ -19,14 +19,6 @@ function M.check()
 			.. ")"
 	)
 
-	local device_id_path = cfg.state_dir .. "/device_id"
-	if vim.fn.filereadable(device_id_path) == 1 then
-		local did = table.concat(vim.fn.readfile(device_id_path), "")
-		vim.health.info("device_id: " .. vim.trim(did))
-	else
-		vim.health.info("device_id: not yet created")
-	end
-
 	-- Daemon
 	vim.health.start("Daemon")
 	local binary_version = daemon.get_binary_version()
@@ -36,66 +28,88 @@ function M.check()
 		vim.health.warn("binary_version: unknown")
 	end
 	if not daemon.is_enabled() then
-		vim.health.warn("Plugin is disabled")
-	elseif daemon_status.daemon_running and channel_status.connected then
-		vim.health.ok("Running (pid: " .. daemon_status.pid .. ", channel: " .. channel_status.channel_id .. ")")
+		vim.health.warn("Plugin is disabled (:CursortabToggle)")
+	elseif daemon_status.daemon_running and connection.connected then
+		vim.health.ok("Running (pid: " .. daemon_status.pid .. ", channel: " .. connection.channel_id .. ")")
 	elseif daemon_status.daemon_running then
 		vim.health.warn("Process running (pid: " .. daemon_status.pid .. ") but not connected")
 	else
 		vim.health.error("Not running", { "Run :CursortabRestart to start the daemon" })
 	end
 
-	-- Provider
-	vim.health.start("Provider")
-	vim.health.info("type: " .. cfg.provider.type)
-	vim.health.info("model: " .. (cfg.provider.model ~= "" and cfg.provider.model or "-"))
-	vim.health.info("url: " .. cfg.provider.url)
-	vim.health.info("api_key_env: " .. (cfg.provider.api_key_env ~= "" and cfg.provider.api_key_env or "-"))
-	vim.health.info("timeout: " .. cfg.provider.completion_timeout .. "ms")
-	vim.health.info("max_tokens: " .. cfg.provider.max_tokens)
-	vim.health.info("temperature: " .. cfg.provider.temperature)
-	vim.health.info("top_k: " .. cfg.provider.top_k)
-	vim.health.info("max_diff_history_tokens: " .. cfg.provider.max_diff_history_tokens)
-	vim.health.info("completion_path: " .. cfg.provider.completion_path)
-	vim.health.info("privacy_mode: " .. (cfg.provider.privacy_mode and "yes" or "no"))
+	-- Connection and reconnect state
+	vim.health.start("Connection")
+	if connection.degraded then
+		vim.health.error(
+			"Degraded: gave up after " .. connection.reconnect_attempts .. " reconnect attempts",
+			{ "Last error: " .. (connection.last_error ~= "" and connection.last_error or "unknown"), "Run :CursortabRestart" }
+		)
+	elseif connection.reconnecting then
+		vim.health.warn(
+			"Reconnecting (attempt " .. connection.reconnect_attempts .. " of 5): " .. connection.last_error
+		)
+	elseif connection.connected then
+		vim.health.ok("Connected")
+	else
+		vim.health.warn("Not connected yet")
+	end
 
-	if cfg.provider.api_key_env ~= "" then
-		local key = vim.fn.getenv(cfg.provider.api_key_env)
+	-- Probe
+	vim.health.start("Probe")
+	local probe = config.get_probe_result()
+	if not probe then
+		vim.health.info("No probe yet (run :Cursortab model)")
+	elseif probe.ok then
+		vim.health.ok(probe.count .. " models available")
+	else
+		vim.health.error("Last probe failed: " .. probe.error, { "Check url and that the server is running" })
+	end
+
+	-- Models and endpoint
+	vim.health.start("Models")
+	vim.health.info("url: " .. cfg.url)
+	vim.health.info("type model: " .. cfg.model)
+	if type(cfg.next_edit) == "table" then
+		vim.health.info("edit model: " .. (cfg.next_edit.model or "auto") .. " (dual mode on)")
+	else
+		vim.health.info("edit model: - (single mode)")
+	end
+	if cfg.api_key_env ~= "" then
+		local key = vim.fn.getenv(cfg.api_key_env)
 		if key == vim.NIL or key == "" then
-			vim.health.error(cfg.provider.api_key_env .. " is not set", {
-				"Export " .. cfg.provider.api_key_env .. " in your shell config",
+			vim.health.error(cfg.api_key_env .. " is not set", {
+				"Export " .. cfg.api_key_env .. " in your shell config",
 				"Run :CursortabRestart after setting it",
 			})
 		else
-			vim.health.ok(cfg.provider.api_key_env .. " is set")
+			vim.health.ok(cfg.api_key_env .. " is set")
 		end
 	end
-
-	if cfg.provider.type == "windsurf" then
-		vim.health.start("Windsurf")
-		local ok, codeium = pcall(require, 'codeium')
-		if not ok then
-			vim.health.error("codeium plugin not installed", { "Install windsurf.nvim (codeium) plugin" })
-		elseif not codeium.s then
-			vim.health.error("codeium server not initialized", { "Run :Codeium Auth to authenticate" })
-		elseif not codeium.s.healthy then
-			vim.health.warn("codeium server not healthy")
-		elseif not codeium.s.port then
-			vim.health.warn("codeium server port not available")
-		else
-			vim.health.ok("codeium server running (port: " .. tostring(codeium.s.port) .. ")")
-		end
+	vim.health.info("context_size: " .. (cfg.context_size and tostring(cfg.context_size) or "auto (probe)"))
+	if cfg.max_tokens then
+		vim.health.info(
+			"max_tokens: type=" .. tostring(cfg.max_tokens.type or 0) .. " edit=" .. tostring(cfg.max_tokens.edit or 0)
+		)
 	end
+	if cfg.fim_tokens then
+		vim.health.info("fim_tokens: explicit (prefix/suffix/middle set)")
+	else
+		vim.health.info("fim_tokens: dialect presets")
+	end
+	vim.health.info("quality.logprobs: " .. (cfg.quality.logprobs and "yes" or "no"))
+	vim.health.info("quality.min_confidence: " .. cfg.quality.min_confidence)
+	vim.health.info("retrieval: " .. (cfg.retrieval.enabled and ("on, max_chunks=" .. cfg.retrieval.max_chunks) or "off"))
 
 	-- Behavior
 	vim.health.start("Behavior")
-	vim.health.info("idle_delay: " .. cfg.behavior.idle_completion_delay .. "ms")
-	vim.health.info("debounce: " .. cfg.behavior.text_change_debounce .. "ms")
+	vim.health.info("idle_completion_delay: " .. cfg.behavior.idle_completion_delay .. "ms")
+	vim.health.info("text_change_debounce: " .. cfg.behavior.text_change_debounce .. "ms")
 	vim.health.info("max_visible_lines: " .. cfg.behavior.max_visible_lines)
 	vim.health.info("cursor_prediction: " .. (cfg.behavior.cursor_prediction.enabled and "yes" or "no"))
 	vim.health.info("auto_advance: " .. (cfg.behavior.cursor_prediction.auto_advance and "yes" or "no"))
 	vim.health.info("proximity_threshold: " .. cfg.behavior.cursor_prediction.proximity_threshold)
 	vim.health.info("enabled_modes: " .. table.concat(cfg.behavior.enabled_modes, ", "))
+	vim.health.info("disabled_in: " .. (#cfg.behavior.disabled_in > 0 and table.concat(cfg.behavior.disabled_in, ", ") or "-"))
 	vim.health.info("ignore_paths: " .. #cfg.behavior.ignore_paths .. " patterns")
 	vim.health.info("ignore_filetypes: " .. #cfg.behavior.ignore_filetypes .. " filetypes")
 	vim.health.info("ignore_gitignored: " .. (cfg.behavior.ignore_gitignored and "yes" or "no"))
@@ -106,11 +120,6 @@ function M.check()
 	vim.health.info("partial_accept: " .. (cfg.keymaps.partial_accept or "disabled"))
 	vim.health.info("trigger: " .. (cfg.keymaps.trigger or "disabled"))
 
-	-- Blink
-	vim.health.start("Blink")
-	vim.health.info("enabled: " .. (cfg.blink.enabled and "yes" or "no"))
-	vim.health.info("ghost_text: " .. (cfg.blink.ghost_text and "yes" or "no"))
-
 	-- UI
 	vim.health.start("UI")
 	vim.health.info("addition_style: " .. cfg.ui.completions.addition_style)
@@ -119,33 +128,12 @@ function M.check()
 	vim.health.info("jump_text: " .. cfg.ui.jump.text)
 	vim.health.info("jump_show_distance: " .. (cfg.ui.jump.show_distance and "yes" or "no"))
 
-	-- FIM Tokens
-	vim.health.start("FIM Tokens")
-	if cfg.provider.fim_tokens == nil then
-		vim.health.info("mode: prompt+suffix (no FIM tokens configured)")
-	else
-		vim.health.info("mode: tokenized")
-		vim.health.info("prefix: " .. cfg.provider.fim_tokens.prefix)
-		vim.health.info("suffix: " .. cfg.provider.fim_tokens.suffix)
-		vim.health.info("middle: " .. cfg.provider.fim_tokens.middle)
-		if cfg.provider.fim_tokens.repo_name and cfg.provider.fim_tokens.repo_name ~= "" then
-			vim.health.info("repo_name: " .. cfg.provider.fim_tokens.repo_name)
-		end
-		if cfg.provider.fim_tokens.file_sep and cfg.provider.fim_tokens.file_sep ~= "" then
-			vim.health.info("file_sep: " .. cfg.provider.fim_tokens.file_sep)
-		end
-	end
-
-	-- Debug
-	vim.health.start("Debug")
-	vim.health.info("immediate_shutdown: " .. (cfg.debug.immediate_shutdown and "yes" or "no"))
-
 	-- Paths
 	vim.health.start("Paths")
-	vim.health.info("enabled: " .. (cfg.enabled and "yes" or "no"))
-	vim.health.info("contribute_data: " .. (cfg.contribute_data and "yes" or "no"))
+	vim.health.info("enabled: " .. (daemon.is_enabled() and "yes" or "no"))
 	vim.health.info("state_dir: " .. cfg.state_dir)
 	vim.health.info("log_level: " .. cfg.log_level)
+	vim.health.info("immediate_shutdown: " .. (cfg.debug.immediate_shutdown and "yes" or "no"))
 end
 
 return M

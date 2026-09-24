@@ -7,7 +7,7 @@ import (
 )
 
 // stageIsPureInsertion reports whether a stage is a pure insertion (no
-// replacement — only addition groups at a single buffer line).
+// replacement, only addition groups at a single buffer line).
 func stageIsPureInsertion(stage *text.Stage) bool {
 	if stage.BufferStart != stage.BufferEnd || len(stage.Groups) == 0 {
 		return false

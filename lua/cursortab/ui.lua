@@ -122,7 +122,7 @@ local absolute_jump_buf = nil
 ---@field extmark_id integer
 
 ---@class WindowInfo
----@field win_id integer
+---@field win_id integer|nil
 ---@field buf_id integer
 
 -- State for completion diff visualization
@@ -333,8 +333,10 @@ local function create_overlay_window(parent_win, buffer_line, col, content, synt
 	local ns_id = opts.ns_id
 	local row_offset = opts.row_offset or 0
 	local screen_anchor = opts.screen_anchor
-	-- Create buffer for overlay content
+	-- Track the buffer before any later call can throw, so cleanup never leaks an untracked buffer or window
 	local overlay_buf = vim.api.nvim_create_buf(false, true)
+	local tracked = { win_id = nil, buf_id = overlay_buf }
+	table.insert(completion_windows, tracked)
 
 	-- Set buffer content
 	---@type string[]
@@ -389,7 +391,7 @@ local function create_overlay_window(parent_win, buffer_line, col, content, synt
 
 	-- Use screenpos so wrap, folds, and virtual lines from other plugins
 	-- (e.g. render-markdown.nvim) don't shift the overlay off the target line.
-	-- buffer_line is the actual buffer line; row_offset adjusts for virtual lines
+	-- buffer_line is the actual buffer line, row_offset adjusts for virtual lines
 	-- that this overlay covers (e.g. stacked modifications or additions).
 	local window_relative_line
 	if screen_anchor and screen_anchor.row and screen_anchor.row > 0 then
@@ -420,6 +422,7 @@ local function create_overlay_window(parent_win, buffer_line, col, content, synt
 		-- Prevent Neovim from auto-adjusting window position when it doesn't fit
 		fixed = true,
 	})
+	tracked.win_id = overlay_win
 
 	local overlay_start_line = buffer_line + row_offset
 	local overlay_has_cursor_line = cursor_line >= overlay_start_line and cursor_line < overlay_start_line + #content_lines
@@ -535,7 +538,6 @@ local function render_append_chars(group, nvim_line, current_win, current_buf, s
 	local content = group.lines[1] or ""
 	local col_start = group.col_start or 0
 	local appended_text = string.sub(content, col_start + 1)
-	local render_ghost_text = config.get().blink.ghost_text
 
 	-- Store expected line state for partial typing optimization (only first append_chars)
 	if is_first_append then
@@ -553,16 +555,12 @@ local function render_append_chars(group, nvim_line, current_win, current_buf, s
 		end
 	end
 
-	if not render_ghost_text then
-		return is_first_append
-	end
-
 	if appended_text and appended_text ~= "" then
 		if config.get().ui.completions.addition_style == "dimmed" then
-			-- col_start is a byte offset; convert to display column for fallback positioning
+			-- col_start is a byte offset, convert to display column for fallback positioning
 			local display_col = vim.fn.strdisplaywidth(string.sub(content, 1, col_start))
 			local screen_anchor = screen_anchor_at_insertion(current_win, nvim_line, col_start)
-			local overlay_win, overlay_buf, _ = create_overlay_window(
+			create_overlay_window(
 				current_win,
 				nvim_line,
 				display_col,
@@ -575,7 +573,6 @@ local function render_append_chars(group, nvim_line, current_win, current_buf, s
 					screen_anchor = screen_anchor,
 				}
 			)
-			table.insert(completion_windows, { win_id = overlay_win, buf_id = overlay_buf })
 
 			if is_first_append then
 				append_chars_extmark_id = nil
@@ -637,7 +634,7 @@ local function render_replace_chars(group, nvim_line, current_win, syntax_ft, ns
 	local original_line_width = vim.fn.strdisplaywidth(old_content)
 
 	if content ~= "" then
-		local overlay_win, overlay_buf, bytes_trimmed = create_overlay_window(
+		local _, overlay_buf, bytes_trimmed = create_overlay_window(
 			current_win,
 			nvim_line,
 			0,
@@ -648,7 +645,6 @@ local function render_replace_chars(group, nvim_line, current_win, syntax_ft, ns
 				ns_id = ns_id,
 			}
 		)
-		table.insert(completion_windows, { win_id = overlay_win, buf_id = overlay_buf })
 
 		-- Highlight the changed portion
 		local ov_line = vim.api.nvim_buf_get_lines(overlay_buf, 0, 1, false)[1] or ""
@@ -711,7 +707,7 @@ local function render_modification(group, nvim_line, current_win, current_buf, s
 		for i = 1, line_count do
 			local new_line = group.lines[i]
 			if new_line and new_line ~= "" then
-				local overlay_win, overlay_buf, _ = create_overlay_window(
+				create_overlay_window(
 					current_win,
 					last_nvim_line,
 					0,
@@ -724,7 +720,6 @@ local function render_modification(group, nvim_line, current_win, current_buf, s
 						row_offset = i,
 					}
 				)
-				table.insert(completion_windows, { win_id = overlay_win, buf_id = overlay_buf })
 			end
 		end
 	else
@@ -732,7 +727,7 @@ local function render_modification(group, nvim_line, current_win, current_buf, s
 		for i = 1, line_count do
 			local new_line = group.lines[i]
 			if new_line and new_line ~= "" then
-				local overlay_win, overlay_buf, _ = create_overlay_window(
+				create_overlay_window(
 					current_win,
 					nvim_line + i - 1,
 					overlay_col,
@@ -743,7 +738,6 @@ local function render_modification(group, nvim_line, current_win, current_buf, s
 						ns_id = ns_id,
 					}
 				)
-				table.insert(completion_windows, { win_id = overlay_win, buf_id = overlay_buf })
 			end
 		end
 	end
@@ -795,7 +789,7 @@ local function render_addition(group, nvim_line, current_win, current_buf, synta
 		for _, line in ipairs(group.lines) do
 			table.insert(display_lines, line ~= "" and line or " ")
 		end
-		local overlay_win, overlay_buf, _ = create_overlay_window(
+		create_overlay_window(
 			current_win,
 			overlay_buffer_line,
 			0,
@@ -808,7 +802,6 @@ local function render_addition(group, nvim_line, current_win, current_buf, synta
 				row_offset = overlay_row_offset,
 			}
 		)
-		table.insert(completion_windows, { win_id = overlay_win, buf_id = overlay_buf })
 	end
 end
 
@@ -823,7 +816,7 @@ local function show_completion(diff_result)
 	-- Don't show in floating windows
 	local win_config = vim.api.nvim_win_get_config(current_win)
 	if win_config.relative ~= "" then
-		return
+		return false
 	end
 
 	-- Cache values used across all groups
@@ -890,6 +883,7 @@ local function show_completion(diff_result)
 			end
 		end
 	end
+	return true
 end
 
 -- Function to show cursor prediction jump text (called from Go)
@@ -905,7 +899,7 @@ local function show_cursor_prediction(line_num)
 
 	-- Don't show preview in floating windows
 	if win_config.relative ~= "" then
-		return
+		return false
 	end
 
 	-- Go now uses 1-indexed line numbers, same as Neovim
@@ -924,7 +918,7 @@ local function show_cursor_prediction(line_num)
 
 	-- Ensure the line number is valid
 	if nvim_line_num < 1 or nvim_line_num > total_lines then
-		return
+		return false
 	end
 
 	---@type CursortabConfig
@@ -997,6 +991,7 @@ local function show_cursor_prediction(line_num)
 		-- Set window background to match jump text highlight
 		vim.api.nvim_set_option_value("winhighlight", "Normal:CursorTabJumpText", { win = absolute_jump_win })
 	end
+	return true
 end
 
 -- Public API
@@ -1011,26 +1006,30 @@ end
 -- Show completion diff highlighting
 ---@param diff_result DiffResult Completion diff result from Go daemon
 function ui.show_completion(diff_result)
-	has_completion = true
 	ui.ensure_close_all()
 	pass_wininfo = nil
-	local ok = pcall(show_completion, diff_result)
+	local ok, rendered = pcall(show_completion, diff_result)
 	pass_wininfo = nil
-	if not ok then
+	has_completion = ok and rendered == true
+	if not has_completion then
 		ui.ensure_close_all()
-		has_completion = false
+		if not ok then
+			vim.notify("cursortab: completion render failed: " .. tostring(rendered), vim.log.levels.WARN)
+		end
 	end
 end
 
 -- Show cursor prediction jump text
 ---@param line_num integer Predicted line number (1-indexed)
 function ui.show_cursor_prediction(line_num)
-	has_cursor_prediction = true
 	ui.ensure_close_all()
-	local ok = pcall(show_cursor_prediction, line_num)
-	if not ok then
+	local ok, rendered = pcall(show_cursor_prediction, line_num)
+	has_cursor_prediction = ok and rendered == true
+	if not has_cursor_prediction then
 		ui.ensure_close_all()
-		has_cursor_prediction = false
+		if not ok then
+			vim.notify("cursortab: cursor prediction render failed: " .. tostring(rendered), vim.log.levels.WARN)
+		end
 	end
 end
 

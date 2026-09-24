@@ -2,12 +2,13 @@
 //
 // Two subcommands:
 //
-//	record   Hit real provider APIs and capture responses as cassettes.
+//	record   Hit the eval server and capture responses as cassettes.
 //	run      Replay cassettes through the engine and emit quality reports.
 //
-// Cassettes live inside each scenario .txtar under the cassette/<provider>.ndjson
-// section. Recording is the only time this tool touches the network — run is
-// fully offline and deterministic.
+// Cassettes live in a sidecar directory next to each scenario .txtar (the
+// .txtar path with the extension stripped), one <target>.ndjson per target.
+// Recording is the only time this tool touches the network, run is fully
+// offline and deterministic.
 package main
 
 import (
@@ -18,7 +19,7 @@ import (
 )
 
 func main() {
-	// Suppress engine lifecycle logs — the eval harness creates/destroys
+	// Suppress engine lifecycle logs, the eval harness creates/destroys
 	// hundreds of engines and the start/stop noise drowns the report.
 	logger.SetLevel(logger.LogLevelError)
 
@@ -34,10 +35,6 @@ func main() {
 		err = runCmd(args)
 	case "record":
 		err = recordCmd(args)
-	case "record-copilot":
-		err = recordCopilotCmd(args)
-	case "record-windsurf":
-		err = recordWindsurfCmd(args)
 	case "help", "-h", "--help":
 		usage()
 	default:
@@ -59,9 +56,7 @@ USAGE:
 
 COMMANDS:
   run              Replay cassettes and emit quality reports
-  record           Hit real provider APIs and capture cassettes (HTTP targets)
-  record-copilot   Drive an external nvim session to capture Copilot NES cassettes
-  record-windsurf  Drive an external nvim session to capture Windsurf cassettes
+  record           Hit the eval server and capture cassettes (HTTP targets)
   help             Show this help
 
 Run "cursortab-eval <command> --help" for command-specific flags.`)

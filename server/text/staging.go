@@ -12,12 +12,10 @@ type Stage struct {
 	BufferStart  int                           // 1-indexed buffer coordinate
 	BufferEnd    int                           // 1-indexed, inclusive
 	Lines        []string                      // New content for this stage
-	Changes      map[int]LineChange            // Changes keyed by line num relative to stage
 	Groups       []*Group                      // Pre-computed groups for rendering
-	CursorLine   int                           // Cursor position (1-indexed, relative to stage)
+	CursorLine   int                           // Cursor position (1-indexed, relative to stage), from CalculateCursorPosition
 	CursorCol    int                           // Cursor column (0-indexed)
 	CursorTarget *types.CursorPredictionTarget // Navigation target
-	IsLastStage  bool
 }
 
 // stageBuilder holds the scratch state used while assembling a Stage.
@@ -523,12 +521,10 @@ func finalizeStages(builders []*stageBuilder, newLines []string, oldLines []stri
 			BufferStart:  b.bufferStart,
 			BufferEnd:    b.bufferEnd,
 			Lines:        stageLines,
-			Changes:      remappedChanges,
 			Groups:       groups,
 			CursorLine:   targetCursorLine,
 			CursorCol:    targetCursorCol,
 			CursorTarget: cursorTarget,
-			IsLastStage:  isLastStage,
 		}
 	}
 	return stages

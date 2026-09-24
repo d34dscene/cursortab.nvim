@@ -19,37 +19,7 @@ func TestCheckTypingMatchesPrediction_NoCompletions(t *testing.T) {
 	assert.False(t, hasRemaining, "hasRemaining when no completions")
 }
 
-func TestShowCurrentStage_UsesStagedManualFlagForMetrics(t *testing.T) {
-	buf := newMockBuffer()
-	buf.lines = []string{"hello"}
-	buf.row = 1
-	buf.col = 5
-	prov := newMockProvider()
-	clock := newMockClock()
-	eng := createTestEngine(buf, prov, clock)
-
-	eng.stagedCompletion = &text.StagedCompletion{
-		Manual: true,
-		Stages: []*text.Stage{{
-			BufferStart: 1,
-			BufferEnd:   1,
-			Lines:       []string{"hello world"},
-			Groups: []*text.Group{{
-				Type:       "modification",
-				BufferLine: 1,
-				Lines:      []string{"hello world"},
-				OldLines:   []string{"hello"},
-			}},
-		}},
-	}
-
-	eng.showCurrentStage()
-
-	assert.NotNil(t, eng.currentSnapshot, "metrics snapshot")
-	assert.True(t, eng.currentSnapshot.ManuallyTriggered, "manual flag follows staged completion")
-}
-
-func TestTextChangeRerender_PreservesManualFlagForMetrics(t *testing.T) {
+func TestTextChangeRerender_KeepsDisplayLive(t *testing.T) {
 	buf := newMockBuffer()
 	buf.lines = []string{"hello"}
 	buf.row = 1
@@ -69,8 +39,8 @@ func TestTextChangeRerender_PreservesManualFlagForMetrics(t *testing.T) {
 	buf.col = 7
 	eng.handleTextChangeImpl()
 
-	assert.NotNil(t, eng.currentSnapshot, "metrics snapshot")
-	assert.True(t, eng.currentSnapshot.ManuallyTriggered, "manual flag survives rerender")
+	assert.NotNil(t, eng.display.completion, "rerender keeps the completion displayed")
+	assert.Equal(t, []string{"hello world"}, eng.display.completion.Lines, "ghost re-staged against the typed prefix")
 }
 
 func TestCheckTypingMatchesPrediction_MatchesPrefix(t *testing.T) {
@@ -272,7 +242,7 @@ func TestHandleCursorTarget_StageNeedsNavigationCapturesRejectedCompletionCandid
 
 	assert.Equal(t, stateHasCursorTarget, eng.state, "state when next stage still needs navigation")
 	assert.Equal(t, 10, buf.showCursorTargetLine, "cursor target line for next stage")
-	assert.NotNil(t, eng.display.rejectionCandidate(), "stage cursor target should capture rejection candidate")
+	assert.NotNil(t, eng.display.rejectCandidate, "stage cursor target should capture rejection candidate")
 }
 
 // TestProcessCompletion_TailTrimModelOverrun tests that when the model generates
@@ -303,7 +273,7 @@ func TestProcessCompletion_TailTrimModelOverrun(t *testing.T) {
 
 	// Model generates 10 lines for a 5-line editable range.
 	// Lines 6-10 duplicate (with modification) post-editable buffer content.
-	// Lines 8-10 match exactly; lines 6-7 are modified.
+	// Lines 8-10 match exactly, lines 6-7 are modified.
 	comp := &types.Completion{
 		StartLine:  1,
 		EndLineInc: 5,
@@ -321,7 +291,7 @@ func TestProcessCompletion_TailTrimModelOverrun(t *testing.T) {
 		},
 	}
 
-	eng.processCompletion(completionResponse(comp))
+	eng.processCompletionWithManual(completionResponse(comp), false)
 
 	// After tail-trim, lines 7-10 should be trimmed (they match buffer[7:10]).
 	// The completion should only produce changes within/near the editable range,
@@ -333,7 +303,7 @@ func TestProcessCompletion_TailTrimModelOverrun(t *testing.T) {
 				if g.Type == "addition" {
 					for _, line := range g.Lines {
 						assert.True(t, line != "  inc('added');",
-							"inc('added') should not appear as addition — it already exists in buffer")
+							"inc('added') should not appear as addition, it already exists in buffer")
 					}
 				}
 			}
@@ -368,7 +338,7 @@ func TestProcessCompletion_NoSpuriousAdditions(t *testing.T) {
 	eng := createTestEngine(buf, prov, clock)
 
 	// Completion from FIM: StartLine=EndLineInc=3 (original cursor row), but Lines
-	// spans lines 3-9 — including lines 4-6 that were already accepted into the buffer.
+	// spans lines 3-9, including lines 4-6 that were already accepted into the buffer.
 	comp := &types.Completion{
 		StartLine:  3,
 		EndLineInc: 3,
@@ -383,7 +353,7 @@ func TestProcessCompletion_NoSpuriousAdditions(t *testing.T) {
 		},
 	}
 
-	result := eng.processCompletion(completionResponse(comp)) == completionShown
+	result := eng.processCompletionWithManual(completionResponse(comp), false) == completionShown
 	assert.True(t, result, "processCompletion should show remaining changes")
 
 	if eng.stagedCompletion != nil && len(eng.stagedCompletion.Stages) > 0 {

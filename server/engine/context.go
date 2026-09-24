@@ -30,7 +30,6 @@ func (e *Engine) newFileStateFromBuffer() *FileState {
 		OriginalLines: slices.Clone(e.buffer.OriginalLines()),
 		DiskLines:     slices.Clone(e.buffer.DiskLines()),
 		LastAccessNs:  e.clock.Now().UnixNano(),
-		Version:       e.buffer.Version(),
 	}
 }
 
@@ -53,12 +52,11 @@ func (e *Engine) handleFileSwitch(oldPath, newPath string, currentLines []string
 	}
 
 	// Drop any in-flight or visible completion work tied to the old file.
-	// The old file's prefetched/streaming/staged completions reference its
-	// line content; applying them against the new buffer would render
-	// against the wrong rows. Late-arriving responses for the cancelled
-	// requests are then discarded by the state guards in events.go.
-	e.cancelCurrentRequest()
-	e.cancelPrefetch()
+	// The old file's streaming/staged completions reference its line content:
+	// applying them against the new buffer would render against the wrong
+	// rows. Late responses for the cancelled requests are discarded by the
+	// generation guards in events.go.
+	e.cancelPending()
 	e.cancelStreaming()
 	e.cursorTarget = nil
 	e.stagedCompletion = nil

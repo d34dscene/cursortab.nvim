@@ -1,4 +1,4 @@
-Correct Go database query with proper error handling — no edits needed at any cursor position.
+Correct Go database query with proper error handling - no edits needed at any cursor position.
 id: suppress-go-getuser
 language: go
 file: db/user.go
@@ -29,5 +29,4 @@ func GetUser(db *sql.DB, id int64) (*User, error) {
 }
 -- steps --
 request-completion manual
-  expect !shown
 

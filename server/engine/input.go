@@ -7,15 +7,8 @@ import (
 	"cursortab/types"
 )
 
-type completionInputOptions struct {
-	lines             []string
-	cursorRow         int
-	cursorCol         int
-	hasCursorOverride bool
-}
-
-func (e *Engine) buildContextSourceInput(opts completionInputOptions, requirements ctx.Materials, materialsBudgetChars int) ctx.ContextSourceInput {
-	current := e.buildCurrentSnapshot(opts)
+func (e *Engine) buildContextSourceInput(requirements ctx.Materials, materialsBudgetChars int) ctx.ContextSourceInput {
+	current := e.buildCurrentSnapshot()
 	snapshot := e.buildFileContextSnapshot(requirements)
 	return ctx.ContextSourceInput{
 		Current:  current,
@@ -28,7 +21,6 @@ func (e *Engine) buildContextSourceInput(opts completionInputOptions, requiremen
 			MaxRecentSnapshots: defaultMaxRecentSnapshots,
 			MaxRecentFileBytes: defaultMaxRecentFileBytes,
 			MaxDiffTokens:      e.config.MaxDiffTokens,
-			MaxUserActions:     defaultMaxUserActions,
 			MaxRetrievalChunks: e.config.MaxRetrievalChunks,
 			ContextChars:       materialsBudgetChars,
 		},
@@ -36,26 +28,16 @@ func (e *Engine) buildContextSourceInput(opts completionInputOptions, requiremen
 	}
 }
 
-func (e *Engine) buildCurrentSnapshot(opts completionInputOptions) ctx.CurrentSnapshot {
-	lines := opts.lines
-	if lines == nil {
-		lines = e.buffer.Lines()
-	}
-	row := e.buffer.Row()
-	col := e.buffer.Col()
-	if opts.hasCursorOverride {
-		row = opts.cursorRow
-		col = opts.cursorCol
-	}
+func (e *Engine) buildCurrentSnapshot() ctx.CurrentSnapshot {
 	return ctx.CurrentSnapshot{
 		WorkspacePath: e.WorkspacePath,
 		File: ctx.FileSnapshot{
 			Path:  e.buffer.Path(),
-			Lines: slices.Clone(lines),
+			Lines: slices.Clone(e.buffer.Lines()),
 		},
 		Cursor: ctx.CursorPosition{
-			Row: row,
-			Col: col,
+			Row: e.buffer.Row(),
+			Col: e.buffer.Col(),
 		},
 		ViewportHeight: e.getViewportHeightConstraint(),
 	}
@@ -63,15 +45,11 @@ func (e *Engine) buildCurrentSnapshot(opts completionInputOptions) ctx.CurrentSn
 
 func (e *Engine) buildFileContextSnapshot(requirements ctx.Materials) ctx.FileContextSnapshot {
 	needs := requirements.FileContextNeeds()
-	if !needs.RecentFileLines &&
-		!needs.RecentFileDiffHistories &&
-		!needs.CurrentDiffHistories &&
-		!needs.UserActions {
+	if !needs.RecentFileLines && !needs.RecentFileDiffHistories && !needs.CurrentDiffHistories {
 		return ctx.FileContextSnapshot{}
 	}
 
 	currentPath := e.buffer.Path()
-	nowNs := e.clock.Now().UnixNano()
 
 	var recentFiles []ctx.RecentFileSnapshot
 	if needs.RecentFileLines || needs.RecentFileDiffHistories {
@@ -98,17 +76,28 @@ func (e *Engine) buildFileContextSnapshot(requirements ctx.Materials) ctx.FileCo
 		currentDiffHistories = clonePtrSlice(e.buffer.DiffHistories())
 	}
 
-	var userActions []*types.UserAction
-	if needs.UserActions {
-		userActions = clonePtrSlice(e.userActions)
-	}
-
 	return ctx.FileContextSnapshot{
 		CurrentDiffHistories: currentDiffHistories,
 		RecentFiles:          recentFiles,
-		UserActions:          userActions,
-		NowNs:                nowNs,
+		NowNs:                e.clock.Now().UnixNano(),
 	}
+}
+
+// getViewportHeightConstraint limits the request window to what is visible
+// when cursor prediction is off.
+func (e *Engine) getViewportHeightConstraint() int {
+	if e.config.CursorPrediction.Enabled {
+		return 0
+	}
+	_, viewportBottom := e.buffer.ViewportBounds()
+	if viewportBottom > 0 && e.buffer.Row() > 0 {
+		// +1 because both cursor and viewport bottom are inclusive (cursor on
+		// last visible line means 1 visible line remaining, not 0).
+		if constraint := viewportBottom - e.buffer.Row() + 1; constraint > 0 {
+			return constraint
+		}
+	}
+	return 0
 }
 
 func clonePtrSlice[T any](items []*T) []*T {

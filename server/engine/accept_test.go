@@ -2,11 +2,12 @@ package engine
 
 import (
 	"context"
+	"errors"
+	"testing"
+
 	"cursortab/assert"
 	"cursortab/text"
 	"cursortab/types"
-	"errors"
-	"testing"
 )
 
 func TestReject(t *testing.T) {
@@ -27,7 +28,7 @@ func TestReject(t *testing.T) {
 	eng.rejectAndRemember()
 
 	assert.Equal(t, stateIdle, eng.state, "state after reject")
-	assert.Nil(t, eng.display.current(), "completions after reject")
+	assert.Nil(t, eng.display.completion, "completions after reject")
 	assert.Nil(t, eng.cursorTarget, "cursorTarget after reject")
 	assert.Greater(t, buf.clearUICalls, 0, "ClearUI should have been called")
 }
@@ -35,8 +36,8 @@ func TestReject(t *testing.T) {
 // TestReject_DropsLeftoverStreamFromAcceptDuringStreaming verifies that reject
 // cancels any in-flight stream from a prior accept-during-streaming. Without
 // this, the leftover stream eventually completes and handleStreamCompleteSimple
-// sees acceptedDuringStreaming=true, which calls handleStreamCompleteAfterAccept
-// and resurrects a completion or cursor target the user just rejected.
+// sees acceptedDuringStreaming=true and resurrects a completion the user just
+// rejected.
 func TestReject_DropsLeftoverStreamFromAcceptDuringStreaming(t *testing.T) {
 	buf := newMockBuffer()
 	prov := newMockProvider()
@@ -64,6 +65,24 @@ func TestReject_DropsLeftoverStreamFromAcceptDuringStreaming(t *testing.T) {
 	}
 }
 
+// TestReject_CancelsInFlightRequest covers the cursor-move path: any user
+// event that rejects the display also cancels the in-flight request.
+func TestReject_CancelsInFlightRequest(t *testing.T) {
+	buf := newMockBuffer()
+	prov := newMockProvider()
+	clock := newMockClock()
+	eng, cancel := createTestEngineWithContext(buf, prov, clock)
+	defer cancel()
+
+	cancelled := false
+	eng.pending = &pendingRequest{gen: 1, role: RoleType, cancel: func() { cancelled = true }}
+
+	eng.reject()
+
+	assert.Nil(t, eng.pending, "pending request cleared")
+	assert.True(t, cancelled, "pending request context cancelled")
+}
+
 func TestAcceptCompletion_BatchExecuteError_ResetsToIdle(t *testing.T) {
 	buf := newMockBuffer()
 	prov := newMockProvider()
@@ -82,8 +101,46 @@ func TestAcceptCompletion_BatchExecuteError_ResetsToIdle(t *testing.T) {
 	eng.acceptCompletion()
 
 	assert.Equal(t, stateIdle, eng.state, "state should reset to idle after batch error")
-	assert.Nil(t, eng.display.current(), "completions should be cleared after batch error")
-	assert.Nil(t, eng.display.batchToApply(), "display batch should be cleared after batch error")
+	assert.Nil(t, eng.display.completion, "completions should be cleared after batch error")
+	assert.Nil(t, eng.display.batch, "display batch should be cleared after batch error")
+}
+
+// TestAcceptCompletion_LastStageRetriggerShowsTarget replaces the old
+// prefetch-consumption flow: accepting the final stage of a retriggering
+// completion shows the cursor target instead of waiting on a prefetch.
+func TestAcceptCompletion_LastStageRetriggerShowsTarget(t *testing.T) {
+	buf := newMockBuffer()
+	buf.lines = []string{"line 1", "line 2", "line 3", "line 4", "line 5"}
+	buf.row = 5
+	buf.col = 0
+	buf.viewportTop = 1
+	buf.viewportBottom = 10
+	prov := newMockProvider()
+	clock := newMockClock()
+	eng, cancel := createTestEngineWithContext(buf, prov, clock)
+	defer cancel()
+
+	eng.state = stateHasCompletion
+	showDisplayedCompletionWithBatchForTest(
+		eng,
+		&types.Completion{
+			StartLine:  5,
+			EndLineInc: 5,
+			Lines:      []string{"new line 5"},
+		},
+		&mockBatch{},
+		nil,
+		nil,
+	)
+	eng.cursorTarget = &types.CursorPredictionTarget{
+		LineNumber:      10,
+		ShouldRetrigger: true,
+	}
+
+	eng.acceptCompletion()
+
+	assert.Equal(t, stateHasCursorTarget, eng.state, "far retrigger target shown after accept")
+	assert.Equal(t, 10, buf.showCursorTargetLine, "cursor target at the predicted line")
 }
 
 func TestPartialAccept_AppendChars_SingleWord(t *testing.T) {
@@ -214,9 +271,9 @@ func TestPartialAccept_MultiLine_FirstLine(t *testing.T) {
 	assert.Equal(t, 1, buf.lastReplacedLine, "replaced line number")
 	assert.Equal(t, "new line 1", buf.lastReplacedContent, "replaced content")
 	assert.Equal(t, stateHasCompletion, eng.state, "state after partial line accept")
-	assert.Equal(t, 2, len(eng.display.current().Lines), "remaining lines")
-	assert.Equal(t, 2, eng.display.current().StartLine, "updated start line")
-	assert.Equal(t, 3, eng.display.current().EndLineInc, "end line unchanged for equal line count")
+	assert.Equal(t, 2, len(eng.display.completion.Lines), "remaining lines")
+	assert.Equal(t, 2, eng.display.completion.StartLine, "updated start line")
+	assert.Equal(t, 3, eng.display.completion.EndLineInc, "end line unchanged for equal line count")
 }
 
 func TestPartialAccept_MultiLine_LastLine(t *testing.T) {
@@ -354,9 +411,9 @@ func TestPartialAccept_AdditionGroup(t *testing.T) {
 	assert.Equal(t, 1, buf.lastReplacedLine, "replaced line number")
 	assert.Equal(t, "func main() {", buf.lastReplacedContent, "replaced content")
 	assert.Equal(t, stateHasCompletion, eng.state, "state after first partial")
-	assert.Equal(t, 2, len(eng.display.current().Lines), "remaining lines")
-	assert.Equal(t, 2, eng.display.current().StartLine, "updated start line")
-	assert.Equal(t, 2, eng.display.current().EndLineInc, "end line preserved from original")
+	assert.Equal(t, 2, len(eng.display.completion.Lines), "remaining lines")
+	assert.Equal(t, 2, eng.display.completion.StartLine, "updated start line")
+	assert.Equal(t, 2, eng.display.completion.EndLineInc, "end line preserved from original")
 }
 
 // TestPartialAccept_AppendCharsWithAddition tests that when a multi-line stage
@@ -410,9 +467,9 @@ func TestPartialAccept_AppendCharsWithAddition(t *testing.T) {
 
 	// After partial accept, the completion should now point to the addition line
 	assert.Equal(t, stateHasCompletion, eng.state, "should still be in HasCompletion")
-	assert.Equal(t, 1, len(eng.display.current().Lines), "should have 1 remaining line")
-	assert.Equal(t, "    n = len(arr)", eng.display.current().Lines[0], "remaining line content")
-	assert.Equal(t, 4, eng.display.current().StartLine, "startLine should be 4")
+	assert.Equal(t, 1, len(eng.display.completion.Lines), "should have 1 remaining line")
+	assert.Equal(t, "    n = len(arr)", eng.display.completion.Lines[0], "remaining line content")
+	assert.Equal(t, 4, eng.display.completion.StartLine, "startLine should be 4")
 }
 
 // TestPartialAccept_StagedCompletion_UsesCurrentGroups tests that during partial
@@ -432,7 +489,7 @@ func TestPartialAccept_StagedCompletion_UsesCurrentGroups(t *testing.T) {
 	// Staged completion exists with OLD groups (before rerenderPartial updated them)
 	eng.stagedCompletion = &text.StagedCompletion{
 		Stages: []*text.Stage{
-			&text.Stage{
+			{
 				BufferStart: 3,
 				BufferEnd:   3,
 				Lines:       []string{"def bubble_sort(arr):", "    n = len(arr)"},
@@ -459,7 +516,7 @@ func TestPartialAccept_StagedCompletion_UsesCurrentGroups(t *testing.T) {
 				},
 			},
 			// Next stage
-			&text.Stage{
+			{
 				BufferStart: 5,
 				BufferEnd:   5,
 				Lines:       []string{"    for i in range(n):"},
@@ -615,16 +672,16 @@ func TestPartialAccept_MultiLineCompletion_CursorTargetConsistency(t *testing.T)
 
 		eng.partialAcceptCompletion()
 		assert.Equal(t, stateHasCompletion, eng.state, "should stay in HasCompletion after partial accept")
-		assert.Equal(t, 3, len(eng.display.current().Lines), "remaining lines")
-		assert.Equal(t, 2, eng.display.current().StartLine, "start line increments")
+		assert.Equal(t, 3, len(eng.display.completion.Lines), "remaining lines")
+		assert.Equal(t, 2, eng.display.completion.StartLine, "start line increments")
 
 		eng.partialAcceptCompletion()
-		assert.Equal(t, 2, len(eng.display.current().Lines), "remaining lines")
-		assert.Equal(t, 3, eng.display.current().StartLine, "start line increments")
+		assert.Equal(t, 2, len(eng.display.completion.Lines), "remaining lines")
+		assert.Equal(t, 3, eng.display.completion.StartLine, "start line increments")
 
 		eng.partialAcceptCompletion()
-		assert.Equal(t, 1, len(eng.display.current().Lines), "remaining lines")
-		assert.Equal(t, 4, eng.display.current().StartLine, "start line increments")
+		assert.Equal(t, 1, len(eng.display.completion.Lines), "remaining lines")
+		assert.Equal(t, 4, eng.display.completion.StartLine, "start line increments")
 
 		eng.partialAcceptCompletion()
 
@@ -691,7 +748,6 @@ func TestPartialAccept_MultiLineCompletion_CursorTargetConsistency(t *testing.T)
 			Groups:      []*text.Group{{Type: "modification", BufferLine: 1}},
 			CursorLine:  1,
 			CursorCol:   0,
-			IsLastStage: false,
 			CursorTarget: &types.CursorPredictionTarget{
 				LineNumber:      3,
 				ShouldRetrigger: false,
@@ -705,7 +761,6 @@ func TestPartialAccept_MultiLineCompletion_CursorTargetConsistency(t *testing.T)
 			Groups:      []*text.Group{{Type: "modification", BufferLine: 3}},
 			CursorLine:  1,
 			CursorCol:   0,
-			IsLastStage: true,
 			CursorTarget: &types.CursorPredictionTarget{
 				LineNumber:      5,
 				ShouldRetrigger: true,
@@ -820,7 +875,7 @@ func TestShowOrNavigateToNextStage_CapturesRejectedCompletionCandidate(t *testin
 
 	assert.Equal(t, stateHasCursorTarget, eng.state, "far next stage should show cursor target")
 	assert.Equal(t, 10, buf.showCursorTargetLine, "cursor target line for next stage")
-	assert.NotNil(t, eng.display.rejectionCandidate(), "next-stage cursor target should capture rejection candidate")
+	assert.NotNil(t, eng.display.rejectCandidate, "next-stage cursor target should capture rejection candidate")
 }
 
 // TestPartialAccept_StagedOffset_PureAddition tests that after partially accepting
@@ -839,7 +894,7 @@ func TestPartialAccept_StagedOffset_PureAddition(t *testing.T) {
 	eng, cancel := createTestEngineWithContext(buf, prov, clock)
 	defer cancel()
 
-	// Stage 1: pure addition at line 3 — insert 3 new lines, replace 0 old lines
+	// Stage 1: pure addition at line 3, insert 3 new lines, replace 0 old lines
 	stage1 := &text.Stage{
 		BufferStart: 3,
 		BufferEnd:   3,

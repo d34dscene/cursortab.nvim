@@ -2,82 +2,86 @@ package engine
 
 import (
 	"cursortab/logger"
-	"cursortab/metrics"
 	"cursortab/text"
 	"cursortab/types"
 	"cursortab/utils"
 )
 
-func (e *Engine) handleCompletionReadyImpl(response *types.CompletionResponse, manual bool) {
-	e.syncBuffer()
+// handleTypeReady processes a type-provider response. The display is only
+// touched when the request is still current, and the end of every path arms
+// the pause timer so the edit consult (dual) or idle retrigger (single) has
+// exactly one timer live.
+func (e *Engine) handleTypeReady(response *types.CompletionResponse, pending *pendingRequest) {
+	if e.bufferTick != pending.tick {
+		logger.Debug("dropped type completion: buffer changed since request")
+		return
+	}
+	e.showGen = pending.gen
+	e.showOrigin = RoleType
 
 	if response == nil {
 		response = &types.CompletionResponse{}
 	}
 	if response.Completion == nil {
+		e.handleCompletionNoChanges(response)
+		e.startIdleTimer()
+		return
+	}
+
+	switch e.processCompletionWithManual(response, pending.manual) {
+	case completionShown:
+		e.startIdleTimer()
+		return
+	case completionSuppressed:
+		e.state = stateIdle
+		e.startIdleTimer()
+		return
+	}
+	e.handleCompletionNoChanges(response)
+	e.startIdleTimer()
+}
+
+// handleEditReady applies the dual-mode pause policy (§6.3): errors are
+// logged upstream and leave the display untouched, quiet keeps whatever is on
+// screen, and a non-empty response upgrades the display when the buffer did
+// not move since the request. No path re-arms the edit timer: the next
+// consult waits for a user event.
+func (e *Engine) handleEditReady(response *types.CompletionResponse, pending *pendingRequest) {
+	if e.bufferTick != pending.tick {
+		logger.Debug("dropped next-edit completion: buffer changed since request")
+		return
+	}
+	if response == nil {
+		response = &types.CompletionResponse{}
+	}
+
+	if response.Completion == nil {
+		if response.CursorTarget == nil {
+			logger.Debug("next-edit: nothing to suggest")
+			return
+		}
 		e.cursorTarget = response.CursorTarget
 		e.handleCursorTarget()
 		return
 	}
 
-	switch e.processCompletionWithManual(response, manual) {
+	e.showGen = pending.gen
+	e.showOrigin = RoleEdit
+	switch e.processCompletionWithManual(response, false) {
 	case completionShown:
-		e.maybeArmNextEdit()
 		return
 	case completionSuppressed:
-		e.pendingMetricsInfo = nil
 		return
 	}
-
-	e.pendingMetricsInfo = nil
-	e.handleCompletionNoChanges(response)
-}
-
-// maybeArmNextEdit arms the pause timer after a typing-source completion is
-// displayed. If the user leaves it alone, the next-edit provider gets asked
-// and may replace the ghost with a full edit.
-func (e *Engine) maybeArmNextEdit() {
-	if e.lastCompletionSource != types.CompletionSourceTyping {
-		return
-	}
-	if !e.display.hasCompletion() {
-		return
-	}
-	e.startNextEditTimer()
-}
-
-// handleNextEditReady swaps the displayed ghost for the next-edit provider's
-// edit, unless the display changed while the request was in flight.
-func (e *Engine) handleNextEditReady(response *types.CompletionResponse) {
-	e.nextEditRequestID = 0
-	e.nextEditCancel = nil
-	display := e.nextEditDisplayComp
-	e.nextEditDisplayComp = nil
-
-	if e.state != stateHasCompletion || !e.display.hasCompletion() || e.display.current() != display {
-		return
-	}
-	if response == nil || response.Completion == nil {
-		return
-	}
-	comp := response.Completion
-	if !e.buffer.HasChanges(comp.StartLine, comp.EndLineInc, comp.Lines) {
-		return
-	}
-
-	e.reject()
-	if e.processCompletionWithManual(response, false) != completionShown {
-		return
-	}
+	// Predicted change is already in the buffer: quiet, keep the display.
 }
 
 func (e *Engine) handleCompletionNoChanges(response *types.CompletionResponse) {
-	if response != nil && response.CursorTarget != nil {
+	if response.CursorTarget != nil {
 		e.cursorTarget = response.CursorTarget
-	} else if response != nil && response.Completion != nil && e.config.CursorPrediction.AutoAdvance && e.config.CursorPrediction.Enabled {
-		completion := response.Completion
+	} else if response.Completion != nil && e.config.CursorPrediction.AutoAdvance && e.config.CursorPrediction.Enabled {
 		e.cursorTarget = &types.CursorPredictionTarget{
-			LineNumber:      int32(completion.EndLineInc),
+			LineNumber:      int32(response.Completion.EndLineInc),
 			ShouldRetrigger: true,
 		}
 	}
@@ -85,9 +89,9 @@ func (e *Engine) handleCompletionNoChanges(response *types.CompletionResponse) {
 }
 
 func (e *Engine) handleTextChangeImpl() {
-	if !e.display.hasCompletion() {
+	if e.display.completion == nil {
 		e.reject()
-		e.startTextChangeTimer()
+		e.armAfterTextChange()
 		return
 	}
 
@@ -97,15 +101,17 @@ func (e *Engine) handleTextChangeImpl() {
 	if matches {
 		if hasRemaining {
 			e.rerenderActiveCompletion()
+			// Every text change restarts the pause clock.
+			e.resetIdleTimer()
 			return
 		}
 		e.reject()
-		e.startTextChangeTimer()
+		e.armAfterTextChange()
 		return
 	}
 
 	e.rejectAndRemember()
-	e.startTextChangeTimer()
+	e.armAfterTextChange()
 }
 
 // checkTypingMatchesPrediction checks if the current buffer state (after user typed)
@@ -114,12 +120,12 @@ func (e *Engine) handleTextChangeImpl() {
 // - matches: true if the current buffer is a valid prefix of the target
 // - hasRemaining: true if there's still content left to predict
 func (e *Engine) checkTypingMatchesPrediction() (bool, bool) {
-	originalLines := e.display.oldLines()
-	if !e.display.hasCompletion() || len(originalLines) == 0 {
+	originalLines := e.display.originalLines
+	if e.display.completion == nil || len(originalLines) == 0 {
 		return false, false
 	}
 
-	completion := e.display.current()
+	completion := e.display.completion
 	targetLines := completion.Lines
 	bufferLines := e.buffer.Lines()
 
@@ -177,7 +183,7 @@ func (e *Engine) checkTypingMatchesPrediction() (bool, bool) {
 	hasRemaining := len(currentLines) < len(targetLines)
 	if !hasRemaining {
 		for i := range currentLines {
-			if i < len(targetLines) && len(currentLines[i]) < len(targetLines[i]) {
+			if len(currentLines[i]) < len(targetLines[i]) {
 				hasRemaining = true
 				break
 			}
@@ -188,7 +194,7 @@ func (e *Engine) checkTypingMatchesPrediction() (bool, bool) {
 }
 
 func (e *Engine) rerenderActiveCompletion() completionOutcome {
-	if !e.display.hasCompletion() {
+	if e.display.completion == nil {
 		return completionNoChanges
 	}
 
@@ -202,16 +208,7 @@ func (e *Engine) rerenderActiveCompletion() completionOutcome {
 		}
 	}
 
-	var metricsInfo *types.MetricsInfo
-	if e.currentMetrics.ID != "" || e.currentMetrics.Additions != 0 || e.currentMetrics.Deletions != 0 {
-		metricsInfo = &types.MetricsInfo{
-			ID:        e.currentMetrics.ID,
-			Additions: e.currentMetrics.Additions,
-			Deletions: e.currentMetrics.Deletions,
-		}
-	}
-
-	outcome := e.processCompletionCandidate(e.display.current(), e.cursorTarget, metricsInfo, manual)
+	outcome := e.processCompletionCandidate(e.display.completion, e.cursorTarget, manual)
 	if outcome == completionShown && e.stagedCompletion != nil && len(tail) > 0 {
 		e.stagedCompletion.Stages = append(e.stagedCompletion.Stages, tail...)
 	}
@@ -239,7 +236,6 @@ func (e *Engine) handleCursorTarget() {
 
 			viewportTop, viewportBottom := e.buffer.ViewportBounds()
 			needsNav := text.StageNeedsNavigation(nextStage, e.buffer.Row(), viewportTop, viewportBottom, e.config.CursorPrediction.ProximityThreshold)
-
 			if !needsNav {
 				e.showCurrentStage()
 				return
@@ -248,12 +244,6 @@ func (e *Engine) handleCursorTarget() {
 			return
 		}
 
-		if e.readyPrefetchCompletion() != nil && e.tryShowPrefetchedCompletion() {
-			return
-		}
-		if e.hasInflightPrefetch() {
-			e.setInflightPrefetchWait(prefetchForCursorPrediction)
-		}
 		e.clearCompletionUIOnly()
 		return
 	}
@@ -263,10 +253,7 @@ func (e *Engine) handleCursorTarget() {
 }
 
 func (e *Engine) clearCompletionUIOnly() {
-	if e.display.hasCompletion() {
-		e.sendMetric(metrics.EventIgnored)
-	}
-	e.cancelCurrentRequest()
+	e.cancelPending()
 	e.stagedCompletion = nil
 	e.resetCompletionFields()
 	e.state = stateIdle
@@ -279,7 +266,7 @@ func (e *Engine) showCursorTargetWithCandidate(target *types.CursorPredictionTar
 	}
 	e.cursorTarget = target
 	e.state = stateHasCursorTarget
-	e.display.setRejectionCandidate(candidate)
+	e.display.rejectCandidate = candidate
 	e.buffer.ShowCursorTarget(int(target.LineNumber))
 }
 
@@ -294,12 +281,7 @@ func (e *Engine) showStageCursorTarget(stage *text.Stage) {
 }
 
 func (e *Engine) showCurrentStage() {
-	if e.stagedCompletion == nil || e.stagedCompletion.CurrentIdx >= len(e.stagedCompletion.Stages) {
-		return
-	}
-	manual := e.stagedCompletion.Manual
-
-	stage := e.getStage(e.stagedCompletion.CurrentIdx)
+	stage := e.getStage(-1)
 	if stage == nil {
 		return
 	}
@@ -311,14 +293,25 @@ func (e *Engine) showCurrentStage() {
 	// don't corrupt the stage's original Groups, which advanceStagedCompletion
 	// needs for correct isPureInsertion/offset calculations.
 	e.setDisplayedStage(stage, text.CopyGroups(stage.Groups))
-	e.recordMetricsShown(e.pendingMetricsInfo, manual) // nil for streaming
-	e.traceShown(stage)
-	e.pendingMetricsInfo = nil
+}
+
+// getStage returns the stage at idx, or the current stage when idx is -1.
+func (e *Engine) getStage(idx int) *text.Stage {
+	if e.stagedCompletion == nil {
+		return nil
+	}
+	if idx < 0 {
+		idx = e.stagedCompletion.CurrentIdx
+	}
+	if idx >= len(e.stagedCompletion.Stages) {
+		return nil
+	}
+	return e.stagedCompletion.Stages[idx]
 }
 
 func (e *Engine) setDisplayedStage(stage *text.Stage, groups []*text.Group) {
 	if stage == nil {
-		e.resetCompletionFields()
+		e.display = displayedCompletion{}
 		return
 	}
 
@@ -328,18 +321,16 @@ func (e *Engine) setDisplayedStage(stage *text.Stage, groups []*text.Group) {
 		Lines:      stage.Lines,
 	}
 
-	e.display.show(
-		completion,
-		e.buffer.PrepareCompletion(
-			stage.BufferStart,
-			stage.BufferEnd,
-			stage.Lines,
-			groups,
-		),
-		e.displayOriginalLines(stage.BufferStart, stage.BufferEnd),
-		groups,
-		e.rejectedCompletionFor(completion),
-	)
+	e.display = displayedCompletion{
+		completion:      completion,
+		batch:           e.buffer.PrepareCompletion(stage.BufferStart, stage.BufferEnd, stage.Lines, groups),
+		originalLines:   e.displayOriginalLines(stage.BufferStart, stage.BufferEnd),
+		groups:          groups,
+		rejectCandidate: e.rejectedCompletionFor(completion),
+		gen:             e.showGen,
+		origin:          e.showOrigin,
+		bufferTick:      e.bufferTick,
+	}
 }
 
 func (e *Engine) displayOriginalLines(startLine, endLineInc int) []string {
@@ -351,71 +342,37 @@ func (e *Engine) displayOriginalLines(startLine, endLineInc int) []string {
 	return originalLines
 }
 
-func (e *Engine) getStage(idx int) *text.Stage {
-	if e.stagedCompletion == nil || idx < 0 || idx >= len(e.stagedCompletion.Stages) {
-		return nil
-	}
-	return e.stagedCompletion.Stages[idx]
-}
-
 // completionOutcome describes what processCompletion decided to do with an
 // incoming completion.
 type completionOutcome int
 
 const (
 	// completionNoChanges means the completion matched the current buffer or
-	// staging produced no visible stage. Caller should handle cursor target
-	// continuation (e.g. handleCompletionNoChanges).
+	// staging produced no visible stage.
 	completionNoChanges completionOutcome = iota
 	// completionShown means the completion was rendered (or a cursor target
 	// was shown) and the engine transitioned to a non-idle state.
 	completionShown
-	// completionSuppressed means the completion matched a recently rejected
-	// entry and was intentionally dropped. Engine is now idle; caller should
-	// not fall back to cursor target handling.
+	// completionSuppressed means the completion hit a response-stage gate
+	// (rejection cache or confidence floor) and was dropped.
 	completionSuppressed
 )
-
-func (e *Engine) processCompletion(response *types.CompletionResponse) completionOutcome {
-	return e.processCompletionWithManual(response, false)
-}
 
 func (e *Engine) processCompletionWithManual(response *types.CompletionResponse, manual bool) completionOutcome {
 	defer logger.Trace("engine.processCompletion")()
 	if response == nil || response.Completion == nil {
 		return completionNoChanges
 	}
-	e.lastConfidence = response.Confidence
 	if e.suppressLowConfidence(response, manual) {
 		return completionSuppressed
 	}
-
-	completion := response.Completion
-	return e.processCompletionCandidate(completion, response.CursorTarget, response.MetricsInfo, manual)
+	return e.processCompletionCandidate(response.Completion, response.CursorTarget, manual)
 }
 
-// suppressLowConfidence drops a completion whose provider-reported mean token
-// logprob is below the configured floor. Mean logprobs are always <= 0, so any
-// floor that gates is negative: 0 disables the gate. A provider that reports no
-// logprobs leaves Confidence nil and is never dropped here. Manual triggers
-// bypass the gate, matching the other suppression heuristics.
-func (e *Engine) suppressLowConfidence(response *types.CompletionResponse, manual bool) bool {
-	if manual || e.config.MinConfidence >= 0 || response.Confidence == nil {
-		return false
-	}
-	if *response.Confidence >= e.config.MinConfidence {
-		return false
-	}
-	logger.Debug("suppressed: low confidence %.2f < %.2f", *response.Confidence, e.config.MinConfidence)
-	return true
-}
-
-func (e *Engine) processCompletionCandidate(completion *types.Completion, cursorTarget *types.CursorPredictionTarget, metricsInfo *types.MetricsInfo, manual bool) completionOutcome {
+func (e *Engine) processCompletionCandidate(completion *types.Completion, cursorTarget *types.CursorPredictionTarget, manual bool) completionOutcome {
 	if completion == nil {
 		return completionNoChanges
 	}
-
-	e.pendingMetricsInfo = metricsInfo
 
 	if !e.buffer.HasChanges(completion.StartLine, completion.EndLineInc, completion.Lines) {
 		return completionNoChanges
@@ -442,7 +399,7 @@ func (e *Engine) processCompletionCandidate(completion *types.Completion, cursor
 	}
 
 	// Trim trailing completion lines that duplicate post-editable buffer content.
-	// The model sometimes generates beyond the editable range; trim the suffix
+	// The model sometimes generates beyond the editable range, trim the suffix
 	// of the completion that matches the buffer past endLine.
 	if len(completion.Lines) > len(originalLines) {
 		excess := len(completion.Lines) - len(originalLines)
@@ -481,36 +438,34 @@ func (e *Engine) processCompletionCandidate(completion *types.Completion, cursor
 		OldLines:           originalLines,
 	})
 
-	if stagingResult != nil && len(stagingResult.Stages) > 0 {
-		firstStage := stagingResult.Stages[0]
-		if cursorTarget != nil {
-			stagingResult.Stages[len(stagingResult.Stages)-1].CursorTarget = cursorTarget
-		}
+	if stagingResult == nil || len(stagingResult.Stages) == 0 {
+		return completionNoChanges
+	}
 
-		// Suppression compares against what the user actually sees: the first
-		// stage. Doing this post-staging means cached single-stage entries can
-		// match the visible portion of an incoming multi-stage completion.
-		if e.suppressRejectedCompletionForStage(firstStage, manual) {
-			e.pendingMetricsInfo = nil
-			e.stagedCompletion = nil
-			e.state = stateIdle
-			return completionSuppressed
-		}
+	firstStage := stagingResult.Stages[0]
+	if cursorTarget != nil {
+		stagingResult.Stages[len(stagingResult.Stages)-1].CursorTarget = cursorTarget
+	}
 
-		e.stagedCompletion = &text.StagedCompletion{
-			Stages:     stagingResult.Stages,
-			CurrentIdx: 0,
-			Manual:     manual,
-		}
+	// Suppression compares against what the user actually sees: the first
+	// stage. Doing this post-staging means cached entries can match the
+	// visible portion of an incoming multi-stage completion.
+	if e.suppressRejectedCompletionForStage(firstStage, manual) {
+		e.stagedCompletion = nil
+		return completionSuppressed
+	}
 
-		if stagingResult.FirstNeedsNavigation {
-			e.showStageCursorTarget(firstStage)
-			return completionShown
-		}
+	e.stagedCompletion = &text.StagedCompletion{
+		Stages:     stagingResult.Stages,
+		CurrentIdx: 0,
+		Manual:     manual,
+	}
 
-		e.showCurrentStage()
+	if stagingResult.FirstNeedsNavigation {
+		e.showStageCursorTarget(firstStage)
 		return completionShown
 	}
 
-	return completionNoChanges
+	e.showCurrentStage()
+	return completionShown
 }

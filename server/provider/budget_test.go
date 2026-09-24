@@ -17,9 +17,9 @@ func TestInputTokens(t *testing.T) {
 		want   int
 	}{
 		{"nil config", nil, 0},
-		{"unset falls back to default", &types.ProviderConfig{ProviderMaxTokens: 512}, 512},
-		{"configured minus generation reserve", &types.ProviderConfig{ProviderContextSize: 8192, ProviderMaxTokens: 512}, 7680},
-		{"degenerate config clamps to zero", &types.ProviderConfig{ProviderContextSize: 256, ProviderMaxTokens: 512}, 0},
+		{"unset falls back to default", &types.ProviderConfig{Endpoint: types.EndpointConfig{MaxTokens: 512}}, 512},
+		{"configured minus generation reserve", &types.ProviderConfig{ContextSize: 8192, Endpoint: types.EndpointConfig{MaxTokens: 512}}, 7680},
+		{"degenerate config clamps to zero", &types.ProviderConfig{ContextSize: 256, Endpoint: types.EndpointConfig{MaxTokens: 512}}, 0},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -29,28 +29,28 @@ func TestInputTokens(t *testing.T) {
 }
 
 func TestMaterialsTokensIsAtMostHalfOfInput(t *testing.T) {
-	config := &types.ProviderConfig{ProviderContextSize: 8192, ProviderMaxTokens: 512}
-	assert.Equal(t, InputTokens(config)/2, MaterialsTokens(config), "materials share")
+	config := &types.ProviderConfig{ContextSize: 8192, Endpoint: types.EndpointConfig{MaxTokens: 512}}
+	assert.Equal(t, InputTokens(config)/2, materialsTokens(config), "materials share")
 }
 
 func TestWindowTokensShrinksWithContextAndKeepsFloor(t *testing.T) {
-	config := &types.ProviderConfig{ProviderContextSize: 8192, ProviderMaxTokens: 512}
+	config := &types.ProviderConfig{ContextSize: 8192, Endpoint: types.EndpointConfig{MaxTokens: 512}}
 	input := InputTokens(config)
 
-	withoutContext := WindowTokens(config, 0)
+	withoutContext := windowTokens(config, 0)
 	assert.Equal(t, input-scaffoldTokenReserve, withoutContext, "window without materials")
 
-	withContext := WindowTokens(config, input*utils.AvgCharsPerToken/2)
+	withContext := windowTokens(config, input*utils.AvgCharsPerToken/2)
 	assert.Equal(t, input-input/2-scaffoldTokenReserve, withContext, "window with materials")
 
-	exhausted := WindowTokens(config, input*utils.AvgCharsPerToken)
+	exhausted := windowTokens(config, input*utils.AvgCharsPerToken)
 	assert.Equal(t, 1, exhausted, "window keeps a one-token floor")
 
-	assert.Equal(t, 0, WindowTokens(nil, 0), "nil config stays untrimmed")
+	assert.Equal(t, 0, windowTokens(nil, 0), "nil config stays untrimmed")
 }
 
 func TestPrepareRequestStateWindowFitsBudget(t *testing.T) {
-	config := &types.ProviderConfig{ProviderContextSize: 2048, ProviderMaxTokens: 512}
+	config := &types.ProviderConfig{ContextSize: 2048, Endpoint: types.EndpointConfig{MaxTokens: 512}}
 	lines := make([]string, 1000)
 	for i := range lines {
 		lines[i] = strings.Repeat("x", 80)
@@ -69,7 +69,7 @@ func TestPrepareRequestStateWindowFitsBudget(t *testing.T) {
 		windowChars += len(line) + 1
 	}
 
-	budget := utils.EstimateCharsFromTokens(WindowTokens(config, input.ContextChars))
+	budget := utils.EstimateCharsFromTokens(windowTokens(config, input.ContextChars))
 	maxLineChars := len(lines[0]) + 1
 	// The balanced window may overshoot by one line on each side of the
 	// cursor; the cursor line itself is always included in full.

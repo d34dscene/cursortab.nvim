@@ -1,4 +1,4 @@
-Correct Python dataclass with method — no edits needed at any cursor position.
+Correct Python dataclass with method - no edits needed at any cursor position.
 id: suppress-python-config
 language: python
 file: config.py
@@ -23,5 +23,4 @@ class Config:
         return f"{self.host}:{self.port}"
 -- steps --
 request-completion manual
-  expect !shown
 

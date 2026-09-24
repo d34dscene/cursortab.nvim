@@ -20,20 +20,20 @@ type suppressCount struct{ correct, total int }
 // appropriate (quietRate).
 type targetStats struct {
 	name      string
-	typ       string
+	dialect   string
 	agg       metrics.Aggregate
 	quietRate float64
 	score     float64
 }
 
-func computeTargetStats(perTarget map[string][]metrics.Score, suppressStats map[string]*suppressCount, targetTypes map[string]string) []targetStats {
+func computeTargetStats(perTarget map[string][]metrics.Score, suppressStats map[string]*suppressCount, targetDialects map[string]string) []targetStats {
 	stats := make([]targetStats, 0, len(perTarget))
 	for name, scores := range perTarget {
 		agg := metrics.Summarize(scores)
 		ts := targetStats{
-			name: name,
-			typ:  targetTypes[name],
-			agg:  agg,
+			name:    name,
+			dialect: targetDialects[name],
+			agg:     agg,
 		}
 		if sc := suppressStats[name]; sc != nil && sc.total > 0 {
 			ts.quietRate = float64(sc.correct) / float64(sc.total)
@@ -56,13 +56,13 @@ func computeTargetStats(perTarget map[string][]metrics.Score, suppressStats map[
 	return stats
 }
 
-func renderQualityReport(perTarget map[string][]metrics.Score, perScenario []perScenarioScore, suppressStats map[string]*suppressCount, targetTypes map[string]string, includePerScenario bool) {
+func renderQualityReport(perTarget map[string][]metrics.Score, perScenario []perScenarioScore, suppressStats map[string]*suppressCount, targetDialects map[string]string, includePerScenario bool) {
 	if len(perTarget) == 0 {
 		fmt.Println("no quality scores collected (no scenarios with -- expected -- section)")
 		return
 	}
 
-	stats := computeTargetStats(perTarget, suppressStats, targetTypes)
+	stats := computeTargetStats(perTarget, suppressStats, targetDialects)
 
 	if includePerScenario && len(perScenario) > 0 {
 		fmt.Println()
@@ -88,14 +88,14 @@ func renderQualityReport(perTarget map[string][]metrics.Score, perScenario []per
 
 	fmt.Println()
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(w, "Target\tType\tScore\tdeltaChrF\tShow rate\tQuiet rate\tp50 (ms)\tp90 (ms)")
+	fmt.Fprintln(w, "Target\tDialect\tScore\tdeltaChrF\tShow rate\tQuiet rate\tp50 (ms)\tp90 (ms)")
 	for _, ts := range stats {
 		quietRate := "-"
 		if ts.quietRate > 0 {
 			quietRate = fmt.Sprintf("%.0f%%", ts.quietRate*100)
 		}
 		fmt.Fprintf(w, "%s\t%s\t%.2f\t%.1f\t%.0f%%\t%s\t%d\t%d\n",
-			ts.name, ts.typ, ts.score, ts.agg.MeanDeltaChrF,
+			ts.name, ts.dialect, ts.score, ts.agg.MeanDeltaChrF,
 			ts.agg.ShowRate*100, quietRate,
 			ts.agg.MedianLatencyMs, ts.agg.P90LatencyMs)
 	}
@@ -115,9 +115,9 @@ func renderQualityReport(perTarget map[string][]metrics.Score, perScenario []per
 }
 
 // buildBaseline computes the current baseline from quality scores and suppress stats.
-func buildBaseline(perTarget map[string][]metrics.Score, suppressStats map[string]*suppressCount, targetTypes map[string]string) Baseline {
+func buildBaseline(perTarget map[string][]metrics.Score, suppressStats map[string]*suppressCount, targetDialects map[string]string) Baseline {
 	b := make(Baseline, len(perTarget))
-	for _, ts := range computeTargetStats(perTarget, suppressStats, targetTypes) {
+	for _, ts := range computeTargetStats(perTarget, suppressStats, targetDialects) {
 		b[ts.name] = TargetBaseline{
 			Score:     ts.score,
 			DeltaChrF: ts.agg.MeanDeltaChrF,

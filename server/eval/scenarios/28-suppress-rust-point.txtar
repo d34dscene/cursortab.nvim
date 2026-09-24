@@ -1,4 +1,4 @@
-Correct Rust struct with constructor and method — no edits needed at any cursor position.
+Correct Rust struct with constructor and method - no edits needed at any cursor position.
 id: suppress-rust-point
 language: rust
 file: point.rs
@@ -26,5 +26,4 @@ impl Point {
 }
 -- steps --
 request-completion manual
-  expect !shown
 

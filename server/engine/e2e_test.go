@@ -151,30 +151,6 @@ func verifyExpectations(t *testing.T, eng *Engine, buf *mockBuffer, expect *e2e.
 			t.Errorf("%s state: got %q, want %q", label, actual, want)
 		}
 	}
-
-	if expect.PrefetchStatus != "" {
-		actual := prefetchStatusName(eng.prefetch)
-		if !strings.EqualFold(actual, expect.PrefetchStatus) {
-			t.Errorf("%s prefetchStatus: got %q, want %q", label, actual, expect.PrefetchStatus)
-		}
-	}
-}
-
-func prefetchStatusName(slot prefetchSlot) string {
-	if slot.ready != nil {
-		return "ready"
-	}
-	if slot.inflight == nil {
-		return "none"
-	}
-	switch slot.inflight.wait {
-	case prefetchAfterTab:
-		return "waitingForTab"
-	case prefetchForCursorPrediction:
-		return "waitingForCursorPrediction"
-	default:
-		return "inFlight"
-	}
 }
 
 // --- Test runner ---
@@ -214,37 +190,14 @@ func runEngineScenario(t *testing.T, sc *engineScenario) {
 				EndLineInc: step.Completion.EndLineInc,
 				Lines:      step.Completion.Lines,
 			}
-			result := eng.processCompletion(completionResponse(comp)) == completionShown
+			result := eng.processCompletionWithManual(completionResponse(comp), false) == completionShown
 			if step.Expect != nil && step.Expect.Shown != nil {
 				assert.Equal(t, *step.Expect.Shown, result, label+" shown")
 			}
 			verifyExpectations(t, eng, buf, step.Expect, label)
 
-		case "prefetch":
-			if step.Completion == nil {
-				t.Fatalf("%s: missing completion field", label)
-			}
-			eng.storeReadyPrefetch(&types.CompletionResponse{Completion: &types.Completion{
-				StartLine:  step.Completion.StartLine,
-				EndLineInc: step.Completion.EndLineInc,
-				Lines:      step.Completion.Lines,
-			}}, false)
-			result := eng.tryShowPrefetchedCompletion()
-			if step.Expect != nil && step.Expect.Shown != nil {
-				assert.Equal(t, *step.Expect.Shown, result, label+" shown")
-			}
-			verifyExpectations(t, eng, buf, step.Expect, label)
-
-		case "stash-prefetch":
-			if step.Completion == nil {
-				t.Fatalf("%s: missing completion field", label)
-			}
-			eng.storeReadyPrefetch(&types.CompletionResponse{Completion: &types.Completion{
-				StartLine:  step.Completion.StartLine,
-				EndLineInc: step.Completion.EndLineInc,
-				Lines:      step.Completion.Lines,
-			}}, false)
-			verifyExpectations(t, eng, buf, step.Expect, label)
+		case "prefetch", "stash-prefetch":
+			t.Fatalf("%s: prefetch steps were removed with the prefetch feature", label)
 
 		case "accept":
 			if eng.stagedCompletion != nil && eng.stagedCompletion.CurrentIdx < len(eng.stagedCompletion.Stages) {

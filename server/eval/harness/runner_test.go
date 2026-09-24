@@ -10,19 +10,19 @@ import (
 	"testing"
 
 	"cursortab/assert"
-	mercuryclient "cursortab/client/mercuryapi"
 	"cursortab/eval/cassette"
+	"cursortab/provider"
 	"cursortab/types"
 )
 
 // TestRecordThenReplayZeta runs a scenario against a local httptest server
 // in record mode (captures a real HTTP round-trip), then replays the
 // cassette against the same scenario and verifies the engine produces the
-// recorded completion. This is the full end-to-end loop. Uses the zeta
-// target because it's openai-compatible and accepts arbitrary URLs.
+// recorded completion. This is the full end-to-end loop. Uses the pinned
+// edit-zeta21 dialect so the request shape is deterministic.
 func TestRecordThenReplayZeta(t *testing.T) {
-	// Fake upstream that returns an openai-shaped completion response with
-	// a valid zeta editable-region body.
+	// Fake upstream that returns an openai-shaped completion response the
+	// pinned edit dialect parses.
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.Copy(io.Discard, r.Body)
 		r.Body.Close()
@@ -61,10 +61,11 @@ func TestRecordThenReplayZeta(t *testing.T) {
 			ViewportBottom: 20,
 		},
 		Targets: []Target{{
-			Name:  "zeta",
-			Type:  "zeta",
-			Model: "zeta-test",
-			URL:   upstream.URL,
+			Name:    "zeta-2.1",
+			Dialect: "edit-zeta21",
+			Role:    provider.RoleEdit,
+			Model:   "zeta-test",
+			URL:     upstream.URL,
 		}},
 		Steps: []Step{
 			{Action: ActionRequestCompletion, Manual: true},
@@ -76,40 +77,30 @@ func TestRecordThenReplayZeta(t *testing.T) {
 	outcome := Run(sc, Config{
 		Mode:       ModeRecord,
 		Transport:  http.DefaultTransport,
-		BaseConfig: &types.ProviderConfig{APIKey: "fake"},
+		BaseConfig: &types.ProviderConfig{Endpoint: types.EndpointConfig{APIKey: "fake"}},
 	})
-	assert.Equal(t, 1, len(outcome.Targets), "targets")
+	assert.Len(t, 1, outcome.Targets, "target outcome")
 	to := outcome.Targets[0]
-	if to.Error != nil {
-		t.Fatalf("record error: %v", to.Error)
-	}
-	if to.Cassette == nil || len(to.Cassette.Interactions) == 0 {
+	assert.NoError(t, to.Error, "record error")
+	if to.Error != nil || to.Cassette == nil {
 		t.Fatal("no cassette captured")
 	}
+	assert.Greater(t, len(to.Cassette.Interactions), 0, "recorded interactions")
 
 	// Replay.
-	sc.Cassettes["zeta"] = to.Cassette
+	sc.Cassettes["zeta-2.1"] = to.Cassette
 	outcome2 := Run(sc, Config{Mode: ModeReplay})
+	assert.Len(t, 1, outcome2.Targets, "replay target outcome")
 	to2 := outcome2.Targets[0]
-	if to2.Error != nil {
-		t.Fatalf("replay error: %v", to2.Error)
-	}
-
-	if len(to2.Steps) == 0 {
-		t.Fatal("no step outcomes in replay")
-	}
-	var sawRequest bool
+	assert.NoError(t, to2.Error, "replay error")
+	sawRequest := false
 	for _, step := range to2.Steps {
 		if step.Step.Action == ActionRequestCompletion {
 			sawRequest = true
-			if step.Err != nil {
-				t.Errorf("request-completion step error: %v", step.Err)
-			}
+			assert.NoError(t, step.Err, "request-completion step")
 		}
 	}
-	if !sawRequest {
-		t.Fatal("no request-completion step outcome")
-	}
+	assert.True(t, sawRequest, "request-completion step outcome")
 }
 
 // TestStrictModelMismatch verifies that the strict-model check fails loudly
@@ -117,7 +108,7 @@ func TestRecordThenReplayZeta(t *testing.T) {
 // This is the core "record once, replay forever" contract: model upgrades
 // must be visible, deliberate events.
 func TestStrictModelMismatch(t *testing.T) {
-	cs := cassette.New("zeta", "zeta-v1")
+	cs := cassette.New("edit-zeta21", "zeta-v1")
 	cs.Interactions = append(cs.Interactions, cassette.Interaction{
 		Request:    cassette.RecordedRequest{Method: "POST", URL: "https://example/"},
 		Response:   cassette.RecordedResponse{Status: 200, BodyB64: cassette.EncodeBody([]byte(`{}`))},
@@ -134,26 +125,23 @@ func TestStrictModelMismatch(t *testing.T) {
 			ViewportBottom: 20,
 		},
 		Targets: []Target{{
-			Name:  "zeta",
-			Type:  "zeta",
-			Model: "zeta-v2", // note: doesn't match cassette's "zeta-v1"
-			URL:   "https://example",
+			Name:    "zeta-2.1",
+			Dialect: "edit-zeta21",
+			Role:    provider.RoleEdit,
+			Model:   "zeta-v2", // note: doesn't match cassette's "zeta-v1"
+			URL:     "https://example",
 		}},
 		Steps:     []Step{{Action: ActionRequestCompletion, Manual: true}},
-		Cassettes: map[string]*cassette.Cassette{"zeta": cs},
+		Cassettes: map[string]*cassette.Cassette{"zeta-2.1": cs},
 	}
 
 	outcome := Run(sc, Config{Mode: ModeReplay, StrictModelVersion: true})
-	if len(outcome.Targets) == 0 {
-		t.Fatal("expected one target outcome")
-	}
+	assert.Len(t, 1, outcome.Targets, "target outcome")
 	to := outcome.Targets[0]
 	if to.Error == nil {
 		t.Fatal("expected strict-model mismatch error, got nil")
 	}
-	if !strings.Contains(to.Error.Error(), "model_version") {
-		t.Errorf("expected error to mention model_version, got %v", to.Error)
-	}
+	assert.Contains(t, to.Error.Error(), "model_version", "strict error message")
 
 	// With strict off, the run should proceed.
 	outcome2 := Run(sc, Config{Mode: ModeReplay, StrictModelVersion: false})
@@ -163,9 +151,13 @@ func TestStrictModelMismatch(t *testing.T) {
 	}
 }
 
-// TestRegressionNoEditsSuppressed verifies the gating path — a scenario with
-// an unmodified buffer (no recent edits) triggers the no-edits suppression.
+// TestRegressionNoEditsSuppressed verifies the gating path: a non-manual
+// request against an unmodified buffer with no diff history is suppressed
+// by the no-edits gate before any provider call. The cassette has zero
+// interactions, so if the gate fails the replayer runs dry and the run
+// reports an error.
 func TestRegressionNoEditsSuppressed(t *testing.T) {
+	unmodified := false
 	sc := &Scenario{
 		ID:       "unmodified-gated",
 		FilePath: "main.go",
@@ -175,19 +167,30 @@ func TestRegressionNoEditsSuppressed(t *testing.T) {
 			Col:            14,
 			ViewportTop:    1,
 			ViewportBottom: 20,
+			Modified:       &unmodified,
 		},
-		Targets: []Target{{Name: "mercuryapi", Type: "mercuryapi", Model: mercuryclient.Model}},
+		Targets: []Target{{
+			Name:    "mellum-4b",
+			Dialect: "fim-mellum",
+			Role:    provider.RoleType,
+			Model:   "mellum-4b-dpo-all.Q8_0",
+			URL:     "https://example",
+		}},
+		Steps: []Step{{Action: ActionRequestCompletion}},
 		Cassettes: map[string]*cassette.Cassette{
-			// Empty cassette: if gating doesn't fire, the replayer will panic
-			// and the test fails.
-			"mercuryapi": cassette.New("mercuryapi", mercuryclient.Model),
+			"mellum-4b": cassette.New("fim-mellum", "mellum-4b-dpo-all.Q8_0"),
 		},
 	}
 
 	outcome := Run(sc, Config{Mode: ModeReplay})
-	if len(outcome.Targets) == 0 {
-		t.Fatal("expected one target outcome")
-	}
+	assert.Len(t, 1, outcome.Targets, "target outcome")
+	to := outcome.Targets[0]
+	assert.NoError(t, to.Error, "run error")
+	assert.Len(t, 1, to.Steps, "step outcomes")
+	step := to.Steps[0]
+	assert.True(t, step.Suppressed, "unmodified buffer should suppress the request")
+	assert.Equal(t, "no-edits", step.SuppressReason, "suppression reason")
+	assert.Equal(t, 0, to.RequestCount, "provider must not be called")
 }
 
 func TestEvalAcceptDoesNotRetriggerRequests(t *testing.T) {
@@ -206,7 +209,7 @@ func TestEvalAcceptDoesNotRetriggerRequests(t *testing.T) {
 		return string(payload)
 	}
 
-	cs := cassette.New("mercuryapi", mercuryclient.Model)
+	cs := cassette.New("edit-zeta21", "fake-model")
 	cs.Interactions = append(cs.Interactions,
 		cassette.Interaction{
 			Request:    cassette.RecordedRequest{Method: "POST", URL: "https://example/"},
@@ -249,20 +252,28 @@ func TestEvalAcceptDoesNotRetriggerRequests(t *testing.T) {
 			Original: "def fetch_user(client: httpx.Client, user_id: str) -> dict:\n    resp = client.get(f\"/users/{user_id}\")\n    resp.raise_for_status()\n    return resp.json()",
 			Updated:  "async def fetch_user(client: httpx.AsyncClient, user_id: str) -> dict:\n    resp = await client.get(f\"/users/{user_id}\")\n    resp.raise_for_status()\n    return resp.json()",
 		}},
-		Targets: []Target{{Name: "mercuryapi", Type: "mercuryapi"}},
+		Targets: []Target{{
+			Name:    "zeta-2.1",
+			Dialect: "edit-zeta21",
+			Role:    provider.RoleEdit,
+			Model:   "fake-model",
+			URL:     "https://example",
+		}},
 		Steps: []Step{
 			{Action: ActionRequestCompletion, Manual: true},
 			{Action: ActionAccept},
 			{Action: ActionRequestCompletion, Manual: true},
 		},
-		Cassettes: map[string]*cassette.Cassette{"mercuryapi": cs},
+		Cassettes: map[string]*cassette.Cassette{"zeta-2.1": cs},
 	}
 
 	outcome := Run(sc, Config{Mode: ModeReplay})
-	assert.Equal(t, 1, len(outcome.Targets), "targets")
+	assert.Len(t, 1, outcome.Targets, "target outcome")
 	to := outcome.Targets[0]
-	if to.Error != nil {
-		t.Fatalf("replay error: %v", to.Error)
+	assert.NoError(t, to.Error, "replay error")
+	assert.Len(t, 3, to.Steps, "step outcomes")
+	if to.Error != nil || len(to.Steps) < 3 {
+		return
 	}
 	assert.Equal(t, 2, to.RequestCount, "manual steps should consume exactly two recorded requests")
 	assert.Equal(t, int64(22), to.Steps[2].ProviderLatencyMs, "second manual request should use second cassette interaction")
@@ -303,7 +314,7 @@ function greet(name) {
 // fixture is loaded correctly.
 func TestParseCassetteSection(t *testing.T) {
 	// Build a minimal cassette.
-	cs := cassette.New("mercuryapi", mercuryclient.Model)
+	cs := cassette.New("fim-mellum", "mellum-4b-dpo-all.Q8_0")
 	cs.Interactions = append(cs.Interactions, cassette.Interaction{
 		Request: cassette.RecordedRequest{
 			Method: "POST", URL: "https://example/",
@@ -319,9 +330,7 @@ func TestParseCassetteSection(t *testing.T) {
 	var buf bytes.Buffer
 	assert.NoError(t, cs.Write(&buf), "write cassette")
 	body := buf.String()
-	if !strings.Contains(body, mercuryclient.Model) {
-		t.Fatalf("expected model version in cassette body: %q", body)
-	}
+	assert.Contains(t, body, "mellum-4b-dpo-all.Q8_0", "model version in cassette body")
 
 	fixture := []byte(`Cassette smoke.
 id: cass-smoke
@@ -331,17 +340,17 @@ col: 0
 hello
 -- steps --
 request-completion
--- cassette/mercuryapi.ndjson --
+-- cassette/mellum-4b.ndjson --
 ` + body)
 
 	sc, err := ParseScenario(fixture, nil)
+	assert.NoError(t, err, "parse scenario")
 	if err != nil {
-		t.Fatalf("parse: %v", err)
+		return
 	}
-	if sc.Cassettes["mercuryapi"] == nil {
-		t.Fatal("cassette not parsed")
-	}
-	if len(sc.Cassettes["mercuryapi"].Interactions) != 1 {
-		t.Errorf("want 1 interaction, got %d", len(sc.Cassettes["mercuryapi"].Interactions))
+	cs2 := sc.Cassettes["mellum-4b"]
+	assert.NotNil(t, cs2, "cassette parsed")
+	if cs2 != nil {
+		assert.Equal(t, 1, len(cs2.Interactions), "interaction count")
 	}
 }

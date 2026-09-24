@@ -21,34 +21,21 @@ local function is_mode_enabled(mode)
 	return false
 end
 
--- Track if autocommands have been set up to prevent duplicate registrations
-local autocommands_setup_done = false
-
 -- Track currently bound keys so we can clean them up on re-setup
 ---@type {accept: string|nil, partial_accept: string|nil, trigger: string|nil}
 local current_keymaps = { accept = nil, partial_accept = nil, trigger = nil }
 
 local esc_handler_ns = nil
 
--- Skip exactly one TextChanged after accepting a completion
----@type boolean
-local skip_next_text_changed = false
-
--- State for cursor movement suppression during completion application
----@type boolean
-local skip_next_cursor_moved = false
-
--- Flag to suppress reject events while waiting for completion after cursor target accept
----@type boolean
-local awaiting_completion_after_jump = false
-
--- Track if text changed in current event loop tick (to dedupe with CursorMovedI)
----@type boolean
-local text_changed_this_tick = false
-
--- True while cursortab is applying a completion; native completion plugins should stay closed
----@type boolean
-local completing = false
+-- Buffer whose mirror Go holds, plus which buffers have live attach callbacks
+---@type integer|nil
+local active_buf = nil
+---@type table<integer, true>
+local attached = {}
+-- Tick of the last pushed text event. Anything that advances changedtick
+-- without a push (skipped echoes, undo phantoms, disconnects) leaves a gap
+-- that the next text_changed or TextChanged closes with a full payload.
+local last_sent_tick = -1
 
 -- Whether blink-cmp is installed (detected once)
 local has_blink = pcall(require, "blink.cmp")
@@ -83,55 +70,223 @@ local function dismiss_native_completion()
 	end
 end
 
+-- Single in-flight table replacing the old one-shot booleans, with a deadline so no value can strand. kind is accept/partial/jump while Go applies, text for a just-sent delta absorbing its cursor echo.
+---@type {seq: integer, deadline: integer, kind: string}|nil
+local pending = nil
+local pending_seq = 0
+
+local ACCEPT_WINDOW_MS = 5000
+local TEXT_WINDOW_MS = 200
+
+local function set_pending(kind, window_ms)
+	pending_seq = pending_seq + 1
+	local seq = pending_seq
+	pending = { seq = seq, deadline = vim.uv.now() + window_ms, kind = kind }
+	vim.defer_fn(function()
+		if pending and pending.seq == seq then
+			pending = nil
+		end
+		release_blink()
+	end, window_ms)
+	return seq
+end
+
+local function pending_active()
+	if pending and vim.uv.now() >= pending.deadline then
+		pending = nil
+	end
+	return pending
+end
+
+local function full_extra()
+	if not active_buf or not vim.api.nvim_buf_is_valid(active_buf) then
+		return nil
+	end
+	return { full = { lines = vim.api.nvim_buf_get_lines(active_buf, 0, -1, false) } }
+end
+
+-- Send a text_changed event carrying either a changed range or a full snapshot
+---@param extra {changed: table}|{full: table}|nil
+---@return boolean
+local function send_text(extra)
+	if not daemon.is_enabled() or not daemon.is_connected() then
+		return false
+	end
+	local payload = daemon.build_payload(active_buf, extra)
+	if not daemon.send_payload("text_changed", payload) then
+		return false
+	end
+	last_sent_tick = payload.tick
+	return true
+end
+
+-- Send a non-text event with cursor/viewport keys for the active buffer
+---@param name string
+---@return boolean
+local function send(name)
+	if buffer.should_skip() or not daemon.is_enabled() then
+		return false
+	end
+	return daemon.send_payload(name, daemon.build_payload(active_buf, nil))
+end
+
+local attach ---@type fun(bufnr: integer)
+
+local function text_change_allowed()
+	local mode = vim.api.nvim_get_mode().mode:sub(1, 1)
+	if mode == "i" then
+		return is_mode_enabled("insert")
+	end
+	return is_mode_enabled("normal")
+end
+
+attach = function(bufnr)
+	if attached[bufnr] then
+		return
+	end
+	attached[bufnr] = true
+	local ok = vim.api.nvim_buf_attach(bufnr, false, {
+		-- One delta per change. Go-initiated edits while an accept is pending are not echoed, the next text_changed carries a full instead.
+		on_lines = function(_, b, tick, first, last_old, last_new)
+			if b ~= active_buf then
+				return false
+			end
+			if not daemon.is_enabled() or not daemon.is_connected() then
+				return false
+			end
+			local p = pending_active()
+			if p and p.kind ~= "text" then
+				return false
+			end
+			if not text_change_allowed() then
+				return false
+			end
+			local sent = false
+			if tick ~= last_sent_tick + 1 then
+				local extra = full_extra()
+				if extra then
+					sent = send_text(extra)
+				end
+			else
+				sent = send_text({
+					changed = {
+						first = first,
+						last_old = last_old,
+						last_new = last_new,
+						lines = vim.api.nvim_buf_get_lines(b, first, last_new, false),
+					},
+				})
+			end
+			if sent then
+				-- Arm only here: this change's CursorMoved echo still fires after on_lines
+				set_pending("text", TEXT_WINDOW_MS)
+			end
+			return false
+		end,
+		-- Fired on buffer reloads like :e which silently kill the callbacks, re-attach and resend a full for the active buffer.
+		on_detach = function(_, b)
+			attached[b] = nil
+			vim.schedule(function()
+				if not vim.api.nvim_buf_is_valid(b) then
+					if active_buf == b then
+						active_buf = nil
+					end
+					return
+				end
+				if not vim.api.nvim_buf_is_loaded(b) then
+					return
+				end
+				attach(b)
+				if active_buf == b then
+					local extra = full_extra()
+					if extra then
+						send_text(extra)
+					end
+				end
+			end)
+		end,
+	})
+	if not ok then
+		attached[bufnr] = nil
+	end
+end
+
+local function activate_if_possible()
+	if buffer.should_skip() then
+		return
+	end
+	local bufnr = vim.api.nvim_get_current_buf()
+	attach(bufnr)
+	if active_buf ~= bufnr then
+		active_buf = bufnr
+		last_sent_tick = -1
+		local extra = full_extra()
+		if extra then
+			send_text(extra)
+		end
+	end
+end
+
 -- Accept key handler
 ---@return string
 local function on_accept()
 	if ui.has_cursor_prediction() or ui.has_completion() then
-		-- Suppress the immediate text change and cursor movement caused by applying the completion
-		skip_next_text_changed = true
-		skip_next_cursor_moved = true
-		-- When accepting cursor prediction, suppress rejects until we receive the completion
-		-- Server runs normal! commands which trigger multiple events
-		if ui.has_cursor_prediction() then
-			awaiting_completion_after_jump = true
-		end
-		completing = true
+		set_pending(ui.has_cursor_prediction() and "jump" or "accept", ACCEPT_WINDOW_MS)
 		suppress_blink()
-		vim.schedule(dismiss_native_completion)
-		daemon.send_event("accept")
+		vim.schedule(function()
+			dismiss_native_completion()
+			release_blink()
+		end)
+		send("accept")
 		return ""
-	else
-		return "\t"
 	end
+	return "\t"
 end
 
--- Escape key handler
+-- Escape key handler, only meaningful while something is displayed (§6.6)
 local function on_escape()
-	daemon.send_event("esc")
+	if ui.has_completion() or ui.has_cursor_prediction() then
+		send("esc")
+	end
 end
 
 -- Partial accept handler (Shift-Tab by default)
 ---@return string
 local function on_partial_accept()
 	if ui.has_completion() then
-		-- Suppress the immediate text change and cursor movement caused by partial accept
-		skip_next_text_changed = true
-		skip_next_cursor_moved = true
-		completing = true
+		set_pending("partial", ACCEPT_WINDOW_MS)
 		suppress_blink()
-		vim.schedule(dismiss_native_completion)
-		daemon.send_event("partial_accept")
+		vim.schedule(function()
+			dismiss_native_completion()
+			release_blink()
+		end)
+		send("partial_accept")
 		return ""
-	else
-		-- Pass through configured key
-		local cfg = config.get()
-		return vim.api.nvim_replace_termcodes(cfg.keymaps.partial_accept, true, true, true)
 	end
+	local cfg = config.get()
+	return vim.api.nvim_replace_termcodes(cfg.keymaps.partial_accept, true, true, true)
 end
 
 -- Manual trigger handler
 local function on_trigger()
-	daemon.send_event("trigger_completion")
+	send("trigger_completion")
+end
+
+-- Shared cursor movement handler (UI only, does not send event)
+---@return boolean suppressed true if the event was suppressed (skip sending)
+local function handle_cursor_moved()
+	local p = pending_active()
+	if p then
+		-- Text echoes are consumed once, accept-family states persist until TextChanged, an RPC answer, or their deadline.
+		if p.kind == "text" then
+			pending = nil
+		end
+		return true
+	end
+	if ui.has_cursor_prediction() or ui.has_completion() then
+		ui.ensure_close_all()
+	end
+	return false
 end
 
 -- Update a single keymap slot: clear old binding if changed, set new one
@@ -159,7 +314,6 @@ local function setup_keymaps()
 	update_keymap("trigger", cfg.keymaps.trigger, on_trigger, plain_opts)
 
 	if esc_handler_ns then
-		-- Clear previous handler
 		vim.on_key(nil, esc_handler_ns)
 	end
 
@@ -171,171 +325,140 @@ local function setup_keymaps()
 	end)
 end
 
--- Set up autocommands (only once)
+-- Set up autocommands and buffer tracking
 local function setup_autocommands()
-	if autocommands_setup_done then
-		return
-	end
-	autocommands_setup_done = true
+	local augroup = vim.api.nvim_create_augroup("cursortab", { clear = true })
 
-	-- Track buffer/window focus changes to update cached state
+	-- Track focus changes, a new buffer becomes the mirror target and gets an immediate full snapshot
 	vim.api.nvim_create_autocmd({ "BufEnter", "WinEnter" }, {
-		callback = vim.schedule_wrap(function()
-			buffer.update_state()
-		end),
+		group = augroup,
+		callback = function(args)
+			vim.schedule(function()
+				buffer.update_state()
+				if args.event == "BufEnter" then
+					activate_if_possible()
+				end
+			end)
+		end,
 	})
 
-	-- Text change events
 	vim.api.nvim_create_autocmd({ "TextChanged", "TextChangedI" }, {
+		group = augroup,
 		callback = function(args)
-			-- Skip if buffer should be ignored
+			-- Any text change ends the waiting state, whatever started it
+			pending = nil
+
 			if buffer.should_skip() then
 				return
 			end
 
-			-- Skip exactly one text change immediately following a completion accept
-			if skip_next_text_changed then
-				skip_next_text_changed = false
-				vim.schedule(function()
-					completing = false
-					release_blink()
-				end)
-				return
-			end
-
-			-- Mark that text changed this tick (to dedupe with CursorMovedI)
-			text_changed_this_tick = true
-			vim.schedule(function()
-				text_changed_this_tick = false
-			end)
-
-			-- Handle cursor prediction (always clear - no partial match logic)
+			-- Keep ghost visuals coherent while the user types into them
 			if ui.has_cursor_prediction() then
 				ui.ensure_close_all()
 			elseif ui.has_completion() then
-				-- For completions, check if typing matches the prediction
-				-- If it matches, update ghost text locally to avoid visual glitch
-				-- If it doesn't match, clear immediately to avoid showing stale ghost text
 				local current_line = vim.api.nvim_get_current_line()
 				local cursor_line = vim.fn.line(".")
 				if ui.typing_matches_completion(cursor_line, current_line) then
-					-- Update extmark position/content locally for smooth visual
 					ui.update_ghost_text_for_typing(cursor_line, current_line)
 				else
 					ui.ensure_close_all()
 				end
 			end
 
-			if args.event == "TextChangedI" and not is_mode_enabled("insert") then
+			local mode_ok = args.event == "TextChangedI" and is_mode_enabled("insert") or is_mode_enabled("normal")
+			if not mode_ok then
 				return
 			end
-			if args.event == "TextChanged" and not is_mode_enabled("normal") then
-				return
+			-- Resend a full snapshot when changedtick moved past what we pushed (skipped echoes, undo phantoms, reconnect gaps)
+			if active_buf and vim.api.nvim_buf_is_valid(active_buf) and vim.api.nvim_buf_get_changedtick(active_buf) ~= last_sent_tick then
+				local extra = full_extra()
+				if extra then
+					send_text(extra)
+				end
 			end
-
-			daemon.send_event("text_changed")
 		end,
 	})
 
-	-- Shared cursor movement handler (UI only, does not send event)
-	---@return boolean suppressed true if the event was suppressed (skip sending)
-	local function handle_cursor_moved(is_insert)
-		if is_insert and text_changed_this_tick then
-			return true
-		end
-		if skip_next_cursor_moved then
-			skip_next_cursor_moved = false
-			return true
-		end
-		if awaiting_completion_after_jump then
-			return true
-		end
-		if ui.has_cursor_prediction() or ui.has_completion() then
-			ui.ensure_close_all()
-		end
-		return false
-	end
-
 	-- Cursor movement events (normal mode)
 	vim.api.nvim_create_autocmd({ "CursorMoved" }, {
+		group = augroup,
 		callback = function()
-			-- Only request completions in normal mode
 			local mode = vim.api.nvim_get_mode().mode:sub(1, 1)
 			if mode ~= "n" then
 				return
 			end
-			if handle_cursor_moved(false) then
+			if handle_cursor_moved() then
 				return
 			end
 			if not is_mode_enabled("normal") then
 				return
 			end
-			daemon.send_event("cursor_moved")
+			send("cursor_moved")
 		end,
 	})
 
 	-- Cursor movement events (insert mode - e.g., arrow keys)
 	vim.api.nvim_create_autocmd({ "CursorMovedI" }, {
+		group = augroup,
 		callback = function()
-			if handle_cursor_moved(true) then
+			if handle_cursor_moved() then
 				return
 			end
 			if not is_mode_enabled("insert") then
 				return
 			end
-			daemon.send_event("cursor_moved")
+			send("cursor_moved")
 		end,
 	})
 
-	-- Insert mode events
 	vim.api.nvim_create_autocmd({ "InsertEnter" }, {
+		group = augroup,
 		callback = function()
-			daemon.send_event("insert_enter")
+			send("insert_enter")
 		end,
 	})
 
 	vim.api.nvim_create_autocmd({ "InsertLeave" }, {
+		group = augroup,
 		callback = function()
-			-- Skip if buffer should be ignored
 			if buffer.should_skip() then
 				return
 			end
-
 			if ui.has_cursor_prediction() or ui.has_completion() then
 				ui.ensure_close_all()
 			end
-			daemon.send_event("insert_leave")
+			send("insert_leave")
 		end,
 	})
 
 	-- File save: reset diff history baseline
 	vim.api.nvim_create_autocmd({ "BufWritePost" }, {
+		group = augroup,
 		callback = function()
-			if buffer.should_skip() then
-				return
-			end
-			daemon.send_event("file_saved")
+			send("file_saved")
 		end,
 	})
 
-	-- Set up autocommand to close completions/predictions on certain events
+	-- Close completions/predictions on context switches. Rejects go out only
+	-- while something is displayed, and never mid-accept.
 	vim.api.nvim_create_autocmd({ "ModeChanged", "CmdlineEnter", "CmdwinEnter", "BufEnter" }, {
+		group = augroup,
 		callback = function(args)
 			-- Don't close when transitioning from normal to insert mode
 			if args.event == "ModeChanged" and args.match and args.match:match("^n:i") then
 				return
 			end
 
-			-- Skip all events while awaiting completion after cursor target jump
-			if awaiting_completion_after_jump then
+			local p = pending_active()
+			if p and p.kind ~= "text" then
 				return
 			end
 
-			if ui.has_cursor_prediction() or ui.has_completion() then
-				ui.ensure_close_all()
+			if not (ui.has_completion() or ui.has_cursor_prediction()) then
+				return
 			end
-
-			daemon.send_reject()
+			ui.ensure_close_all()
+			send("esc")
 		end,
 	})
 end
@@ -345,17 +468,40 @@ function events.setup()
 	buffer.setup()
 	setup_autocommands()
 	setup_keymaps()
+	daemon.on_connected = events.resync
+	activate_if_possible()
+end
+
+-- Reply to Go's cursortab_resync request (and reconnect resync) with a full payload
+function events.resync()
+	if not active_buf or not vim.api.nvim_buf_is_valid(active_buf) then
+		active_buf = nil
+		if buffer.should_skip() then
+			return
+		end
+		active_buf = vim.api.nvim_get_current_buf()
+		attach(active_buf)
+		last_sent_tick = -1
+	end
+	local extra = full_extra()
+	if extra then
+		send_text(extra)
+	end
 end
 
 -- Clear all completions (exposed for manual use)
 function events.clear_all_completions()
+	local shown = ui.has_completion() or ui.has_cursor_prediction()
+	pending = nil
 	ui.close_all()
-	daemon.send_reject()
+	if shown then
+		send("esc")
+	end
 end
 
--- Clear the awaiting completion flag (called when completion is received)
-function events.clear_awaiting_completion()
-	awaiting_completion_after_jump = false
+-- Clear the in-flight pending state (called on every RPC answer)
+function events.clear_pending()
+	pending = nil
 end
 
 ---Accept current completion/prediction if available.
@@ -367,7 +513,7 @@ end
 ---Check if cursortab is mid-completion (for other plugins to suppress their menus).
 ---@return boolean
 function events.is_completing()
-	return completing
+	return pending_active() ~= nil
 end
 
 return events

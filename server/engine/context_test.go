@@ -2,10 +2,11 @@ package engine
 
 import (
 	"context"
+	"testing"
+
 	"cursortab/assert"
 	"cursortab/text"
 	"cursortab/types"
-	"testing"
 )
 
 func TestIsFileStateValid(t *testing.T) {
@@ -85,20 +86,12 @@ func TestHandleFileSwitch_DropsInFlightWork(t *testing.T) {
 	eng, cancel := createTestEngineWithContext(buf, prov, clock)
 	defer cancel()
 
-	prefetchCtx, cancelPrefetch := context.WithCancel(context.Background())
 	currentCtx, currentCancel := context.WithCancel(context.Background())
 	streamCtx, streamCancel := context.WithCancel(context.Background())
-	defer cancelPrefetch()
 	defer currentCancel()
 	defer streamCancel()
 
-	eng.prefetch = prefetchSlot{
-		inflight: &prefetchInflight{cancel: cancelPrefetch},
-		ready: &prefetchedCompletion{CompletionResponse: &types.CompletionResponse{Completion: &types.Completion{
-			StartLine: 5, EndLineInc: 5, Lines: []string{"old file completion"},
-		}}},
-	}
-	eng.currentCancel = currentCancel
+	eng.pending = &pendingRequest{gen: 3, role: RoleType, cancel: currentCancel}
 	eng.completionStream = newMockCompletionStream(streamCancel)
 	eng.streamingState = &streamingState{}
 	eng.state = stateStreamingCompletion
@@ -115,11 +108,10 @@ func TestHandleFileSwitch_DropsInFlightWork(t *testing.T) {
 
 	eng.handleFileSwitch("a.go", "b.go", []string{"new content"})
 
-	assertNoPrefetch(t, eng, "prefetch cleared")
-	assert.Nil(t, eng.currentCancel, "current request cancel cleared")
+	assert.Nil(t, eng.pending, "pending request cleared")
 	assert.Nil(t, eng.completionStream, "completion stream cleared")
 	assert.Nil(t, eng.streamingState, "streaming state cleared")
-	assert.Nil(t, eng.display.current(), "completions cleared")
+	assert.Nil(t, eng.display.completion, "completions cleared")
 	assert.Nil(t, eng.stagedCompletion, "staged completion cleared")
 	assert.Nil(t, eng.cursorTarget, "cursor target cleared")
 	assert.Equal(t, stateIdle, eng.state, "state reset to idle")
@@ -128,7 +120,6 @@ func TestHandleFileSwitch_DropsInFlightWork(t *testing.T) {
 		name string
 		ctx  context.Context
 	}{
-		{"prefetch", prefetchCtx},
 		{"current", currentCtx},
 		{"stream", streamCtx},
 	} {

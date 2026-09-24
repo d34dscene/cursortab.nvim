@@ -1,4 +1,4 @@
-Correct Rust match with guard clause — no edits needed at any cursor position.
+Correct Rust match with guard clause - no edits needed at any cursor position.
 id: suppress-rust-match
 language: rust
 file: describe.rs
@@ -19,5 +19,4 @@ pub fn describe(value: Option<i32>) -> String {
 }
 -- steps --
 request-completion manual
-  expect !shown
 

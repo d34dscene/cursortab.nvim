@@ -16,8 +16,7 @@ local buffer = {}
 ---@field current_win integer|nil
 
 -- Convert a gitignore-style glob pattern to a Lua pattern.
--- If the pattern contains "/", it matches against the full relative path;
--- otherwise it matches against the filename only.
+-- If the pattern contains "/", it matches against the full relative path, otherwise against the filename only.
 ---@param path string Absolute file path
 ---@param pattern string Gitignore-style glob pattern
 ---@return boolean
@@ -25,7 +24,7 @@ local function match_ignore_pattern(path, pattern)
 	-- Determine what to match against
 	local match_target
 	if pattern:find("/", 1, true) then
-		-- Pattern contains "/" — match against relative path from cwd
+		-- Pattern contains "/" so match against relative path from cwd
 		local cwd = vim.fn.getcwd() .. "/"
 		if path:sub(1, #cwd) == cwd then
 			match_target = path:sub(#cwd + 1)
@@ -33,7 +32,7 @@ local function match_ignore_pattern(path, pattern)
 			match_target = path
 		end
 	else
-		-- No "/" in pattern — match against filename only
+		-- No "/" in pattern so match against filename only
 		match_target = vim.fn.fnamemodify(path, ":t")
 	end
 
@@ -98,7 +97,7 @@ local gitignore_exceptions = {
 
 -- Check if a file is ignored by git (cached).
 -- The first check for a path runs git asynchronously and optimistically treats
--- the file as not ignored; the cache is corrected and buffer state invalidated
+-- the file as not ignored. The cache is corrected and buffer state invalidated
 -- when the spawn completes.
 ---@param path string Absolute file path
 ---@return boolean

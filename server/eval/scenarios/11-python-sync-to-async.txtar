@@ -1,4 +1,4 @@
-User made `fetch_user` async. The caller `build_profile` is now broken — it needs async/await and callers must propagate. Multi-step: fix caller body first, then fix the function signature.
+User made `fetch_user` async. The caller `build_profile` is now broken - it needs async/await and callers must propagate. Multi-step: fix caller body first, then fix the function signature.
 id: python-sync-to-async
 language: python
 file: profile.py

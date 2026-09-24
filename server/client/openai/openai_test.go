@@ -511,47 +511,54 @@ func TestDoLineStream_WithAPIKey(t *testing.T) {
 	assert.Equal(t, "Bearer sk-line-stream-key", capturedAuth, "Authorization header")
 }
 
-func TestLogprobValuesFromContentShape(t *testing.T) {
-	// llama.cpp and the OpenAI chat completions API return the content-item
-	// shape; the legacy tokens/token_logprobs fields are absent.
-	var decoded CompletionResponse
-	body := `{"choices":[{"text":" return a","logprobs":{"content":[
-		{"token":" return","logprob":-0.42},
-		{"token":" a","logprob":-0.01}
-	]}}]}`
-	assert.NoError(t, json.Unmarshal([]byte(body), &decoded), "decode")
-
-	values := decoded.Choices[0].Logprobs.LogprobValues()
-	assert.Equal(t, 2, len(values), "one value per content item")
-	assert.Equal(t, -0.42, values[0], "first logprob")
-	assert.Equal(t, -0.01, values[1], "second logprob")
-}
-
-func TestDoLineStream_CollectsContentShapeLogprobs(t *testing.T) {
+func TestDoCompletion_SendsCachePromptAndOmitsZeroTemperature(t *testing.T) {
+	var bodies []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		flusher, _ := w.(http.Flusher)
-		w.Header().Set("Content-Type", "text/event-stream")
-		w.WriteHeader(http.StatusOK)
-
-		w.Write([]byte("data: {\"choices\":[{\"text\":\" return\",\"logprobs\":{\"content\":[{\"token\":\" return\",\"logprob\":-0.42}]}}]}\n\n"))
-		flusher.Flush()
-		w.Write([]byte("data: {\"choices\":[{\"text\":\" a + b\",\"logprobs\":{\"content\":[{\"token\":\" a\",\"logprob\":-0.01},{\"token\":\" +\",\"logprob\":-0.03}]}}]}\n\n"))
-		flusher.Flush()
-		w.Write([]byte("data: [DONE]\n\n"))
-		flusher.Flush()
+		body, _ := io.ReadAll(r.Body)
+		bodies = append(bodies, string(body))
+		resp := CompletionResponse{
+			Choices: []struct {
+				Index        int       `json:"index"`
+				Text         string    `json:"text"`
+				Logprobs     *Logprobs `json:"logprobs"`
+				FinishReason string    `json:"finish_reason"`
+			}{{Index: 0, Text: "ok", FinishReason: "stop"}},
+		}
+		json.NewEncoder(w).Encode(resp)
 	}))
 	defer server.Close()
 
 	client := NewClient(server.URL, "", "")
-	stream := client.DoLineStream(context.Background(), &CompletionRequest{
-		Model:  "test-model",
-		Prompt: "func add",
-	}, 0)
 
+	_, err := client.DoCompletion(context.Background(), &CompletionRequest{Model: "m", Prompt: "p"})
+	assert.NoError(t, err, "zero-temperature request")
+	assert.True(t, strings.Contains(bodies[0], `"cache_prompt":true`), "cache_prompt sent")
+	assert.False(t, strings.Contains(bodies[0], "temperature"), "zero temperature omitted")
+
+	_, err = client.DoCompletion(context.Background(), &CompletionRequest{Model: "m", Prompt: "p", Temperature: 0.7})
+	assert.NoError(t, err, "non-zero temperature request")
+	assert.True(t, strings.Contains(bodies[1], `"temperature":0.7`), "temperature sent when non-zero")
+	assert.False(t, strings.Contains(bodies[0], `"n"`), "no n field")
+	assert.False(t, strings.Contains(bodies[0], "echo"), "no echo field")
+}
+
+func TestDoLineStream_SendsCachePrompt(t *testing.T) {
+	var body string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		body = string(b)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "", "")
+	stream := client.DoLineStream(context.Background(), &CompletionRequest{Model: "m", Prompt: "p"}, 0)
 	for range stream.LinesChan() {
 	}
-	result := <-stream.DoneChan()
+	<-stream.DoneChan()
 
-	assert.NotNil(t, result.Logprobs, "logprobs attached")
-	assert.Equal(t, []float64{-0.42, -0.01, -0.03}, result.Logprobs.LogprobValues(), "logprobs in stream order")
+	assert.True(t, strings.Contains(body, `"cache_prompt":true`), "stream request sends cache_prompt")
+	assert.True(t, strings.Contains(body, `"stream":true`), "stream flag sent")
 }

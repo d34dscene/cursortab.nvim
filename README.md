@@ -1,13 +1,10 @@
 # cursortab.nvim
 
-A Neovim plugin that provides edit completions and cursor predictions.
-
-> [!NOTE]
->
-> **Help improve completions** by contributing anonymous usage data to our
-> [open dataset](https://github.com/cursortab/api). Set `contribute_data = true`
-> in your config to opt in. No code content or file paths are collected —
-> [see the schema](https://github.com/cursortab/api/blob/main/docs/community-data-schema.md).
+Ghost-text completion and cursor jumps for Neovim, backed by any llama.cpp
+server. Dual mode runs a FIM model while you type (mellum, qwen) and an edit
+model on pause (zeta, sweep) for next-edit rewrites and Tab-to-jump cursor
+targets. Models, prompt format and context window are auto-detected on
+connect.
 
 <p align="center">
     <img src="assets/demo.gif" width="600">
@@ -17,29 +14,19 @@ A Neovim plugin that provides edit completions and cursor predictions.
 
 - [Requirements](#requirements)
 - [Installation](#installation)
-  - [Mercury API (hosted, no local GPU needed)](#mercury-api-hosted-no-local-gpu-needed)
-  - [Zeta-2.1 (local next-edit prediction)](#zeta-21-local-next-edit-prediction)
-  - [Qwen3.5-0.8B/Sweep (fastest local)](#qwen35-08bsweep-fastest-local)
   - [Using lazy.nvim](#using-lazynvim)
   - [Using packer.nvim](#using-packernvim)
 - [Configuration](#configuration)
-  - [Highlight Groups](#highlight-groups)
-  - [Providers](#providers)
-    - [Benchmarks](#benchmarks)
-    - [Inline Provider (Default)](#inline-provider-default)
-    - [FIM Provider](#fim-provider)
-    - [Sweep Provider](#sweep-provider)
-    - [Zeta-2.1 Provider](#zeta-21-provider)
-    - [Zeta-2 Provider](#zeta-2-provider)
-    - [Zeta Provider (legacy)](#zeta-provider-legacy)
-    - [Copilot Provider](#copilot-provider)
-    - [Windsurf Provider](#windsurf-provider)
-    - [Mercury API Provider](#mercury-api-provider)
-  - [blink.cmp Integration](#blinkcmp-integration)
-- [Usage](#usage)
-  - [Commands](#commands)
-- [Development](#development)
+- [Dual mode](#dual-mode)
+- [llama.cpp serving](#llamacpp-serving)
+  - [Model guidance](#model-guidance)
+- [Commands](#commands)
+- [Keymaps](#keymaps)
+- [Highlight groups](#highlight-groups)
+- [Advanced configuration](#advanced-configuration)
 - [FAQ](#faq)
+- [Eval harness](#eval-harness)
+- [Benchmarks](#benchmarks)
 - [Contributing](#contributing)
 - [License](#license)
 
@@ -47,74 +34,24 @@ A Neovim plugin that provides edit completions and cursor predictions.
 
 ## Requirements
 
-- Go 1.25.0+ (for building the server component)
-- Neovim 0.8+ (for the plugin)
+- Neovim 0.8+
+- Go 1.25+ to build the daemon
+- A llama.cpp server, local or remote
 
 ## Installation
-
-Recommended starting points:
-
-- **Best hosted:** Mercury API
-- **Best local next-edit:** Zeta-2.1
-- **Fastest local:** Qwen3.5-0.8B with the `inline` provider, or Sweep 1.5B/0.5B
-  with the `sweep` provider
-
-Pick a provider below, then use the matching `setup()` call in your plugin
-config. See [Providers](#providers) for all available options.
-
-### Mercury API (hosted, no local GPU needed)
-
-1. Get an API key from [Inception Labs](https://docs.inceptionlabs.ai/)
-2. Set the environment variable:
-
-   ```bash
-   export MERCURY_AI_TOKEN="your-api-key-here"
-   ```
-
-### Zeta-2.1 (local next-edit prediction)
-
-Run [llama.cpp](https://github.com/ggml-org/llama.cpp):
-
-```bash
-llama-server -hf mradermacher/zeta-2.1-GGUF --ctx-size 16384 --port 8000
-```
-
-### Qwen3.5-0.8B/Sweep (fastest local)
-
-Run [llama.cpp](https://github.com/ggml-org/llama.cpp):
-
-```bash
-llama-server -hf unsloth/Qwen3.5-0.8B-GGUF:Q8_0 --port 8000
-# llama-server -hf sweepai/sweep-next-edit-0.5b --port 8000
-# llama-server -hf sweepai/sweep-next-edit-1.5b --port 8000
-```
 
 ### Using [lazy.nvim](https://github.com/folke/lazy.nvim)
 
 ```lua
 {
   "cursortab/cursortab.nvim",
-  -- version = "*",  -- Use latest tagged version for more stability
-  lazy = false,      -- The server is already lazy loaded
+  lazy = false,  -- the daemon starts with Neovim
   build = "cd server && go build",
   config = function()
     require("cursortab").setup({
-      provider = {
-        -- Mercury API (hosted)
-        type = "mercuryapi",
-        api_key_env = "MERCURY_AI_TOKEN",
-
-        -- Zeta-2.1 (best local)
-        -- type = "zeta-2.1",
-        -- url = "http://localhost:8000",
-
-        -- Qwen3.5-0.8B (fastest local, defaults to "inline")
-        -- url = "http://localhost:8000",
-
-        -- sweep-next-edit-0.5B/1.5B (fastest local)
-        -- type = "sweep",
-        -- url = "http://localhost:8000",
-      },
+      url = "http://localhost:8000",
+      model = "auto",
+      next_edit = { model = "auto" },
     })
   end,
 }
@@ -125,139 +62,116 @@ llama-server -hf unsloth/Qwen3.5-0.8B-GGUF:Q8_0 --port 8000
 ```lua
 use {
   "cursortab/cursortab.nvim",
-  -- tag = "*",  -- Use latest tagged version for more stability
   run = "cd server && go build",
   config = function()
     require("cursortab").setup({
-      provider = {
-        type = "mercuryapi",
-        api_key_env = "MERCURY_AI_TOKEN",
-      },
+      url = "http://localhost:8000",
+      model = "auto",
+      next_edit = { model = "auto" },
     })
-  end
+  end,
 }
 ```
 
 ## Configuration
 
-<details>
-<summary>Full config</summary>
+The whole required config is three lines:
 
 ```lua
 require("cursortab").setup({
-  enabled = true,
-  log_level = "info",  -- "trace", "debug", "info", "warn", "error"
-  state_dir = vim.fn.stdpath("state") .. "/cursortab",  -- Directory for runtime files (log, socket, pid)
-  contribute_data = false,  -- Opt-in: send anonymous metrics to train a better gating model
-  trace_enabled = false,    -- Record local completion session traces for offline evaluation
-
-  keymaps = {
-    accept = "<Tab>",           -- Keymap to accept completion, or false to disable
-    partial_accept = "<S-Tab>", -- Keymap to partially accept, or false to disable
-    trigger = false,            -- Keymap to manually trigger completion, or false to disable
-  },
-
-  ui = {
-    completions = {
-      addition_style = "dimmed",  -- "dimmed" or "highlight"
-      fg_opacity = 0.6,           -- opacity for completion overlays (0=invisible, 1=fully visible)
-    },
-    jump = {
-      symbol = "",              -- Symbol shown for jump points
-      text = " TAB ",            -- Text displayed after jump symbol
-      show_distance = true,      -- Show line distance for off-screen jumps
-    },
-  },
-
-  behavior = {
-    idle_completion_delay = 50,  -- Delay in ms after idle to trigger completion (-1 to disable)
-    text_change_debounce = 50,   -- Debounce in ms after text change to trigger completion (-1 to disable)
-    max_visible_lines = 12,      -- Max visible lines per completion (0 to disable)
-    disabled_in = {},                         -- Tree-sitter scopes to suppress completions (e.g., { "comment", "string" })
-    enabled_modes = { "insert", "normal" },  -- Modes where completions are active
-    cursor_prediction = {
-      enabled = true,            -- Show jump indicators after completions
-      auto_advance = true,       -- When no changes, show cursor jump to last line
-      proximity_threshold = 2,   -- Min lines apart to show cursor jump (0 to disable)
-    },
-    ignore_paths = {             -- Glob patterns for files to skip completions
-      "*.min.js",
-      "*.min.css",
-      "*.map",
-      "*-lock.json",
-      "*.lock",
-      "*.sum",
-      "*.csv",
-      "*.tsv",
-      "*.parquet",
-      "*.zip",
-      "*.tar",
-      "*.gz",
-      "*.pem",
-      "*.key",
-      ".env",
-      ".env.*",
-      "*.log",
-    },
-    ignore_filetypes = { "", "terminal" }, -- Filetypes to skip completions
-    ignore_gitignored = true,    -- Skip files matched by .gitignore
-  },
-
-  provider = {
-    type = "inline",                      -- Provider: "inline", "fim", "sweep", "zeta-2.1", "zeta-2", "zeta", "copilot", "windsurf", or "mercuryapi"
-    url = "http://localhost:8000",        -- URL of the provider server
-    api_key_env = "",                     -- Env var name for API key (e.g., "OPENAI_API_KEY")
-    model = "",                           -- Model name
-    temperature = 0.0,                    -- Sampling temperature
-    context_size = 0,                     -- Model context window in tokens; total prompt stays under it (0 = conservative default)
-    max_tokens = 512,                     -- Max tokens to generate (inline default: 64, fim default: 128)
-    top_k = 50,                           -- Top-k sampling
-    min_p = 0.0,                          -- Min-p threshold, llama.cpp only (0 = server default)
-    repeat_penalty = 0.0,                 -- Repetition penalty, llama.cpp only (0 = server default)
-    completion_timeout = 5000,            -- Timeout in ms for completion requests
-    max_diff_history_tokens = 512,        -- Max tokens for diff history (0 = no limit)
-    completion_path = "/v1/completions",  -- API endpoint path
-    -- fim_tokens is optional. Omit (the default) to use OpenAI prompt+suffix
-    -- format (e.g. DeepSeek). Set it to opt into tokenized FIM:
-    --   fim_tokens = {
-    --     prefix = "<|fim_prefix|>",
-    --     suffix = "<|fim_suffix|>",
-    --     middle = "<|fim_middle|>",
-    --     repo_name = "<|repo_name|>",     -- optional; auto-detected for Qwen
-    --     file_sep = "<|file_sep|>",       -- optional; auto-detected for Qwen
-    --     filename = "<filename>",         -- optional; Mellum per-file context headers
-    --   },
-    privacy_mode = true,                  -- Don't send telemetry to provider
-    retrieval_enabled = false,            -- Include matching workspace code in the prompt
-    retrieval_max_chunks = 0,             -- Max retrieved chunks per prompt (0 = default 8)
-    logprobs = false,                     -- Request token logprobs and gate on confidence
-    min_confidence = 0.0,                 -- Drop completions with mean token logprob below this (0 = off)
-  },
-
-  next_edit = {
-    enabled = false,                      -- Second edit-prediction model while you pause
-    type = "zeta-2.1",                    -- "zeta-2.1", "zeta-2", "zeta", or "sweep"
-    model = "",                           -- Model id (empty = provider.model)
-    url = "",                             -- Provider URL override (empty = provider.url)
-    idle_delay = 500,                     -- Ms of no typing before consulting the model
-  },
-
-  blink = {
-    enabled = false,    -- Enable blink source
-    ghost_text = true,  -- Show native ghost text alongside blink menu
-  },
-
-  debug = {
-    immediate_shutdown = false,  -- Shutdown daemon immediately when no clients
-  },
+  url = "http://localhost:8000",  -- or https://your-server
+  model = "auto",                 -- type model, auto picks mellum > qwen > plain
+  next_edit = { model = "auto" }, -- edit model, auto picks zeta-2.1 > zeta-2 > sweep
 })
 ```
 
-</details>
+Drop `next_edit` to run single mode. An idle buffer then asks the type model
+instead of the edit model.
 
-You can also run `:help cursortab-config` to see the configuration.
+Everything else is probed when the daemon connects:
 
-### Highlight Groups
+- The model list comes from `GET /v1/models`. It feeds `model = "auto"` and
+  the `:Cursortab model` picker.
+- The prompt format and FIM tokens come from the model family. Mellum gets
+  its `<fim_prefix>` style tokens, Qwen gets repo tokens, and
+  `POST /tokenize` probes the vocabulary for unknown models.
+- The context window comes from `GET /props` and falls back to 8192.
+- Sampling stays server side. Every request sends `cache_prompt = true` so
+  llama.cpp reuses the cached prefix.
+
+Run `:help cursortab-config` for the full option reference.
+
+## Dual mode
+
+One ghost text surface, two roles.
+
+- Keystrokes debounce for 35ms, then the type model answers with a FIM
+  completion.
+- A 400ms pause hands the buffer to the edit model. A real rewrite replaces
+  the ghost text. The answer can carry a cursor target, and Tab jumps to it.
+- An empty edit answer means nothing to do. The valid type ghost already on
+  screen stays.
+- Edit errors and timeouts are logged at Info level and never disable the
+  type path.
+- Any keystroke supersedes in-flight requests and re-triggers the type model.
+- Tab, S-Tab and Esc act on whatever is displayed, whichever role produced
+  it.
+
+With `model = "auto"` the type role prefers mellum, then qwen, then plain
+FIM. With `next_edit.model = "auto"` the edit role prefers zeta-2.1, then
+zeta-2, then sweep.
+
+## llama.cpp serving
+
+Serving flags matter more for perceived speed than the model choice:
+
+- `--cache-reuse` reuses the KV cache for the unchanged prompt prefix
+  across keystrokes. This is what makes the request after a keystroke fast.
+- Speculative decoding with `--model-draft` (a small model of the same
+  family) typically doubles or triples decode throughput.
+- Keep generations short. The type role defaults to 64 tokens and the edit
+  role to 256.
+
+```bash
+llama-server -hf unsloth/Qwen3.5-0.8B-GGUF:Q8_0 --port 8000 --cache-reuse
+```
+
+One router can host both roles and autoload each model on first use. A
+router that sleeps models adds cold wake latency to the first request after
+idle.
+
+### Model guidance
+
+| Role              | Recommended                              | Notes                                                                    |
+| ----------------- | ---------------------------------------- | ------------------------------------------------------------------------ |
+| Type, while typing | `mellum-4b`, `qwen3.5-0.8B` to `4B`     | FIM, fast, 64 token budget                                               |
+| Edit, on pause    | `zeta-2.1`, `zeta-2`, `sweep-next-edit`  | Multi-edit rewrites and cursor jumps, quiet when nothing to do           |
+
+## Commands
+
+- `:Cursortab model`: probe the server, pick models from a grouped picker,
+  then restart the daemon
+- `:Cursortab toggle`: enable or disable the plugin
+- `:Cursortab restart`: restart the daemon
+- `:Cursortab status`: show daemon and connection status
+- `:Cursortab log`: open the daemon log
+- `:Cursortab clear_log`: clear the daemon log
+- `:checkhealth cursortab`: probe results, configured models, connection and
+  reconnect state
+
+## Keymaps
+
+- Tab accepts the shown completion, or jumps to the cursor target
+- S-Tab partially accepts, one word for short completions and one line for
+  multi-line ones
+- Esc hides the completion
+- The trigger keymap is off by default. Bind it to request a completion by
+  hand. Manual triggers bypass every suppression gate.
+
+Jump indicators appear when an edit model changes a distant region. The
+label reads TAB and shows the line distance when the target is off screen.
+
+## Highlight groups
 
 The plugin defines the following highlight groups with `default = true`, so you
 can override them in your colorscheme or config:
@@ -277,552 +191,188 @@ To customize, set the highlight before or after calling `setup()`:
 vim.api.nvim_set_hl(0, "CursorTabAddition", { bg = "#1a3a1a" })
 ```
 
-### Providers
-
-The plugin supports nine AI provider backends: Inline, FIM, Sweep, Zeta-2.1,
-Zeta-2, Zeta (legacy), Copilot, Windsurf, and Mercury API.
-
-They sit on three transports:
-
-| Transport                           | Providers                                              |
-| ----------------------------------- | ------------------------------------------------------ |
-| OpenAI-compatible `/v1/completions` | inline, fim, sweep, zeta, zeta-2, zeta-2.1, mercuryapi |
-| Copilot LSP                         | copilot                                                |
-| Windsurf service                    | windsurf                                               |
-
-Two task profiles use them. **Insert** profiles (`inline`, `fim`) complete
-inside the current line. **Edit** profiles (`sweep`, `zeta`, `zeta-2`,
-`zeta-2.1`, `mercuryapi`) predict a rewrite of a nearby region and can drive
-cursor targets.
-
-Prompt formats stay per-profile because they genuinely differ: SeedCoder
-V0211, SeedCoder V0318 numbered boundaries, Mercury region markers, and the
-FIM token layouts. What is shared lives in the `provider` package: request
-windowing and token budgeting, streaming, diff history and diagnostics
-formatting, retrieval rendering, and confidence. Each profile registers
-itself with `provider.Register` at init, so the daemon and the eval harness
-build providers through one `provider.Build` call instead of a switch each.
-Copilot and Windsurf are not registered: they need the editor buffer or a live
-LSP shim, so their callers construct them.
-
-| Provider     | Hosted | Multi-line | Multi-edit | Cursor Prediction | Streaming | Model                     |
-| ------------ | :----: | :--------: | :--------: | :---------------: | :-------: | ------------------------- |
-| `inline`     |        |            |            |                   |           | Any base model            |
-| `fim`        |        |     ✓      |            |                   |     ✓     | Any FIM-capable           |
-| `sweep`      |        |     ✓      |     ✓      |         ✓         |     ✓     | Sweep Next-Edit family    |
-| `zeta-2.1`   |        |     ✓      |     ✓      |         ✓         |           | `zeta-2.1` (SeedCoder-8B) |
-| `zeta-2`     |        |     ✓      |     ✓      |         ✓         |     ✓     | `zeta-2` (SeedCoder-8B)   |
-| `zeta`       |        |     ✓      |     ✓      |         ✓         |     ✓     | `zeta` (Qwen2.5-Coder)    |
-| `copilot`    |   ✓    |     ✓      |     ✓      |         ✓         |           | GitHub Copilot            |
-| `windsurf`   |   ✓    |     ✓      |            |                   |           | Windsurf AI               |
-| `mercuryapi` |   ✓    |     ✓      |     ✓      |         ✓         |           | `mercury-edit-2`          |
-
-**Context Per Provider:**
-
-| Context             | inline | fim | sweep | zeta-2.1 | zeta-2 | zeta | copilot | windsurf | mercuryapi |
-| ------------------- | :----: | :-: | :---: | :------: | :----: | :--: | :-----: | :------: | :--------: |
-| Buffer content      |   ✓    |  ✓  |   ✓   |    ✓     |   ✓    |  ✓   |         |    ✓     |     ✓      |
-| Edit history        |        | ✓°  |   ✓   |    ✓     |   ✓    |  ✓   |         |          |     ✓      |
-| Previous file state |        |     |   ✓   |          |        |      |         |          |            |
-| LSP diagnostics     |        | ✓°  |   ✓   |    ✓     |   ✓    |  ✓   |         |          |     ✓      |
-| Treesitter context  |        | ✓°  |   ✓   |    ✓     |   ✓    |  ✓   |         |          |     ✓      |
-| Git diff context    |        | ✓°  |   ✓   |    ✓     |   ✓    |  ✓   |         |          |     ✓      |
-| Recent files        |        | ✓°  |   ✓   |    ✓     |   ✓    |  ✓   |         |          |     ✓      |
-| User actions        |        |     |   ✓   |          |        |      |         |          |            |
-
-° FIM cross-file context requires repo-level tokens (`repo_name`, `file_sep`)
-or the Mellum `filename` token. Auto-detected presets apply for Qwen (via
-`repo_name`/`file_sep`) and Mellum (via the `fim_tokens = "mellum"` preset);
-set manually for other models that support them.
-
-#### Retrieval
-
-Local models produce generically plausible code because they only see the
-buffer and, at best, whatever files were edited most recently. Recency is the
-wrong signal: the completion usually needs the declaration that shares a name
-with what is being written, wherever it lives.
-
-Set `retrieval_enabled = true` to index the workspace and add the matching
-declarations to the prompt. The index is built once per workspace in the
-background, so the first lookup returns nothing and later ones hit a warm
-cache. Go declarations are extracted with the real Go parser, other languages
-with a brace/indent scan. Ranking is identifier-first: a name match beats a
-generic word, a same-directory match gets a boost, at most two chunks come
-from any one file, and duplicate declarations collapse to one.
-
-Two rules keep retrieved context from hurting:
-
-- **Functions send their signature, not their body.** A retrieved body leaks
-  straight into the completion. In testing, a chunk ending in `return nil, nil`
-  made a 7B model emit exactly that instead of the call the user needed. Types,
-  consts, and vars have no body to leak, so they keep their full text.
-- **The current file is never retrieved.** It is already in the provider's
-  window, and re-sending its declarations makes the model read its own
-  enclosing function as a reference and copy from it.
-
-Retrieved chunks render in the provider's cross-file format (`<filename>`
-blocks for Mellum, `file_sep` sections for Qwen, plain path headers
-otherwise), tagged with their real workspace-relative path.
-
-`retrieval_max_chunks` caps how many chunks are added. Retrieved context
-shares the provider's `context_size` budget with the rest of the cross-file
-context.
-
-#### Confidence gating
-
-Set `logprobs = true` to request per-token log probabilities and record a mean
-confidence per completion. Set `min_confidence` to a negative value such as
-`-1.5` to drop completions below that floor. Mean logprobs are always `<= 0`,
-so `0` disables the gate. Manual triggers bypass it, and providers that do not
-report logprobs are never gated.
-
-This is the cheapest way to stop low-quality suggestions from appearing at
-all. Lower show rate with higher precision is the goal.
-
-#### Local serving notes
-
-Two serving flags matter more for perceived speed than the model choice:
-
-- `--cache-reuse` on llama.cpp, so the KV cache for the unchanged prefix is
-  reused across keystrokes. This is what makes the request right after a
-  keystroke fast.
-- Speculative decoding (`--model-draft` with a small model, e.g. a 0.5B of the
-  same family) against the target. Typically 2 to 3x decode throughput, which
-  is what keeps a completion inside a short pause.
-
-Keep completions short (`max_tokens` 64 to 128) and lean on streaming plus
-cursor-target prefetch rather than generating far ahead.
-
-#### Benchmarks
-
-Measured on 50 scenarios (25 quality + 25 suppress) using the
-[eval harness](CONTRIBUTING.md#eval-harness). Sorted by Score (higher = better):
-
-- **Score** — `deltaChrF × gateScore / 100` where
-  `gateScore = 2 × showRate × quietRate / (showRate + quietRate)` (harmonic mean
-  / F1). Combines edit quality with gating behavior into a single metric.
-- **deltaChrF** — edit quality when shown (character n-gram F-score on the diff
-  region)
-- **Show rate** — fraction of quality scenarios where a completion was shown
-- **Quiet rate** — fraction of suppress scenarios where the provider correctly
-  produced nothing
-
-| Target               | Type       |    Score | deltaChrF | Show rate | Quiet rate | p50 (ms) | p90 (ms) |
-| -------------------- | ---------- | -------: | --------: | --------: | ---------: | -------: | -------: |
-| zeta-2               | zeta-2     | **0.61** |  **65.4** |   **92%** |    **96%** |      551 |      833 |
-| zeta                 | zeta       |     0.56 |      62.4 |       88% |        92% |      413 |      662 |
-| mercuryapi           | mercuryapi |     0.49 |      61.8 |   **92%** |        69% |      332 |      393 |
-| qwen3.6-27B          | fim        |     0.23 |      32.0 |       60% |        92% |      214 |      455 |
-| sweep-next-edit-7B   | sweep      |     0.23 |      46.0 |       64% |        40% |      270 |      515 |
-| qwen3.5-0.8B         | fim        |     0.21 |      37.3 |       80% |        44% |      137 |      226 |
-| sweep-next-edit-1.5B | sweep      |     0.21 |      43.7 |       68% |        36% |      157 |      258 |
-| qwen3.5-2B           | fim        |     0.20 |      35.1 |       80% |        44% |      185 |      429 |
-| qwen3.5-4B           | fim        |     0.18 |      28.7 |       64% |        64% |      357 |      730 |
-| windsurf             | windsurf   |     0.13 |      19.1 |       52% |   **100%** |      556 |      995 |
-| copilot              | copilot    |     0.13 |      22.3 |       40% |   **100%** |      351 |      915 |
-| sweep-next-edit-0.5B | sweep      |     0.10 |      23.0 |       52% |        40% |      126 |  **207** |
-| qwen3.6-35B-A3B      | fim        |     0.10 |      19.2 |       40% |        80% |  **113** |      411 |
-
-#### Inline Provider (Default)
+## Advanced configuration
 
 <details>
-<summary>Details</summary>
-
-Single-line completion using any OpenAI-compatible `/v1/completions` endpoint.
+<summary>Full config</summary>
 
 ```lua
 require("cursortab").setup({
-  provider = {
-    type = "inline",
-    url = "http://localhost:8000",
-  },
-})
-```
+  url = "http://localhost:8000",
+  model = "auto",                 -- type model, "auto" probes /v1/models
+  next_edit = { model = "auto" }, -- edit model, remove to disable dual mode
 
-```bash
-llama-server -hf unsloth/Qwen3.5-0.8B-GGUF:Q8_0 --port 8000
-```
+  api_key_env = "",   -- env var read at daemon startup, sent as the api key
+  max_tokens = nil,   -- generation caps, defaults { type = 64, edit = 256 }
+  context_size = nil, -- nil probes /props, falls back to 8192
+  fim_tokens = nil,   -- explicit FIM tokens for exotic models, nil is probed
+  quality = { logprobs = false, min_confidence = 0 },
+  retrieval = { enabled = false, max_chunks = 0 },
+  log_level = "info", -- trace, debug, info, warn, error
+  state_dir = nil,    -- nil means stdpath("state")/cursortab
 
-</details>
-
-#### FIM Provider
-
-<details>
-<summary>Details</summary>
-
-Fill-in-the-Middle multi-line completion. Compatible with Qwen, DeepSeek-Coder,
-and similar FIM-capable models.
-
-From experimentation, FIM models need to be >7B models to have consistent
-results.
-
-```lua
-require("cursortab").setup({
-  provider = {
-    type = "fim",
-    url = "http://localhost:8000",
-    max_tokens = 256,
-  },
-})
-```
-
-Models with a non-standard token order (Mellum, SeedCoder) emit the suffix
-before the prefix. Use a preset instead of spelling out every token:
-
-```lua
-require("cursortab").setup({
-  provider = {
-    type = "fim",
-    url = "http://localhost:8000",
-    fim_tokens = "mellum",
-  },
-})
-```
-
-Equivalent to the full form:
-
-```lua
-    fim_tokens = {
-      prefix = "<fim_prefix>",
-      suffix = "<fim_suffix>",
-      middle = "<fim_middle>",
-      filename = "<filename>",
-      suffix_first = true,
-    },
-```
-
-The `filename` token enables Mellum-style cross-file context: recently edited
-files are prepended as `<filename>path\n<content>` blocks before the FIM
-tokens. In experiments this measurably improved API accuracy when the answer
-depends on helpers defined in other files.
-
-````
-
-Note: on llama.cpp servers, the prompt+suffix mode above relies on the FIM
-token metadata in the GGUF. Some models (e.g. Mellum) produce empty or
-degenerate completions through that path with real-sized prompts, but work
-fine with explicit tokens. If completions come back empty on llama.cpp,
-switch to the tokenized mode.
-
-```bash
-llama-server -hf unsloth/Qwen3.5-0.8B-GGUF:Q8_0 --port 8000
-````
-
-</details>
-
-#### Sweep Provider
-
-<details>
-<summary>Details</summary>
-
-Local next-edit prediction using [Sweep models](https://huggingface.co/sweepai):
-`sweep-next-edit-v2-7B`, `sweep-next-edit-1.5B`, `sweep-next-edit-0.5B`.
-
-```lua
-require("cursortab").setup({
-  provider = {
-    type = "sweep",
-    url = "http://localhost:8000",
-  },
-})
-```
-
-```bash
-llama-server -hf sweepai/sweep-next-edit-1.5b --port 8000
-```
-
-</details>
-
-#### Zeta-2.1 Provider
-
-<details>
-<summary>Details</summary>
-
-Zed's [Zeta-2.1](https://huggingface.co/zed-industries/zeta-2.1)
-(SeedCoder-8B) uses the V0318 multi-region prompt. The model selects the exact
-rewrite span through numbered boundaries, reducing generated output compared
-with Zeta-2. Diagnostics are limited to ranged entries that intersect the
-editable excerpt. Run it locally with
-[llama.cpp](https://github.com/ggml-org/llama.cpp).
-
-```lua
-require("cursortab").setup({
-  provider = {
-    type = "zeta-2.1",
-    url = "http://localhost:8000",
-  },
-})
-```
-
-```bash
-llama-server -hf mradermacher/zeta-2.1-GGUF --ctx-size 16384 --port 8000
-```
-
-</details>
-
-#### Zeta-2 Provider
-
-<details>
-<summary>Details</summary>
-
-Zed's [Zeta-2](https://huggingface.co/zed-industries/zeta-2) (SeedCoder-8B)
-uses the earlier single-region prompt. Run it locally with
-[llama.cpp](https://github.com/ggml-org/llama.cpp).
-
-```lua
-require("cursortab").setup({
-  provider = {
-    type = "zeta-2",
-    url = "http://localhost:8000",
-  },
-})
-```
-
-```bash
-llama-server -hf bartowski/zed-industries_zeta-2-GGUF:Q8_0 --port 8000
-```
-
-</details>
-
-#### Zeta Provider (legacy)
-
-<details>
-<summary>Details</summary>
-
-Zed's original [Zeta](https://huggingface.co/zed-industries/zeta) model
-(Qwen2.5-Coder-7B). Superseded by [Zeta-2.1](#zeta-21-provider).
-
-```lua
-require("cursortab").setup({
-  provider = {
-    type = "zeta",
-    url = "http://localhost:8000",
-  },
-})
-```
-
-```bash
-llama-server -hf bartowski/zed-industries_zeta-GGUF:Q8_0 --port 8000
-```
-
-</details>
-
-#### Copilot Provider
-
-<details>
-<summary>Details</summary>
-
-GitHub Copilot via
-[copilot-language-server](https://github.com/github/copilot-language-server-release).
-Requires a Copilot subscription and `vim.lsp.enable`.
-
-```lua
-require("cursortab").setup({
-  provider = {
-    type = "copilot",
-  },
-})
-```
-
-</details>
-
-#### Windsurf Provider
-
-<details>
-<summary>Details</summary>
-
-Windsurf completions using the local language server bundled by the
-[windsurf.nvim](https://github.com/Exafunction/windsurf.nvim) plugin. The
-provider discovers the server's port and API key automatically via the plugin's
-internal state — no manual URL or key configuration needed.
-
-**Requirements:**
-
-- Install [windsurf.nvim](https://github.com/Exafunction/windsurf.nvim) and
-  authenticate with Codeium (`:Codeium Auth`)
-- A Windsurf account
-
-**Example Configuration:**
-
-```lua
-require("cursortab").setup({
-  provider = {
-    type = "windsurf",
-  },
-})
-```
-
-</details>
-
-#### Mercury API Provider
-
-<details>
-<summary>Details</summary>
-
-Hosted [Mercury](https://docs.inceptionlabs.ai/) next-edit model by Inception
-Labs.
-
-```bash
-export MERCURY_AI_TOKEN="your-api-key-here"
-```
-
-```lua
-require("cursortab").setup({
-  provider = {
-    type = "mercuryapi",
-    api_key_env = "MERCURY_AI_TOKEN",
-  },
-})
-```
-
-</details>
-
-### blink.cmp Integration
-
-<details>
-<summary>Details</summary>
-
-This integration exposes a minimal blink source that only consumes
-`append_chars` (end-of-line ghost text). Complex diffs (multi-line edits,
-replacements, deletions, cursor prediction UI) still render via the native UI.
-
-```lua
-require("cursortab").setup({
   keymaps = {
-    accept = false, -- Let blink manage <Tab>
+    accept = "<Tab>",           -- accept the shown completion
+    partial_accept = "<S-Tab>", -- accept the next word or line
+    trigger = false,            -- manual trigger keymap, off by default
   },
-  blink = {
-    enabled = true,
-    ghost_text = false,  -- Disable native ghost text
-  },
-})
 
-require("blink.cmp").setup({
-  sources = {
-    providers = {
-      cursortab = {
-        module = "cursortab.blink",
-        name = "cursortab",
-        async = true,
-        -- Should match provider.completion_timeout in cursortab config
-        timeout_ms = 5000,
-        score_offset = 50, -- Higher priority among suggestions
-      },
+  ui = {
+    completions = {
+      addition_style = "dimmed", -- "dimmed" or "highlight"
+      fg_opacity = 0.6,          -- 0 invisible, 1 fully visible
+    },
+    jump = {
+      symbol = "",
+      text = " TAB ",
+      show_distance = true,      -- line distance for off-screen jumps
     },
   },
+
+  behavior = {
+    idle_completion_delay = 400, -- pause before the edit model runs
+    text_change_debounce = 35,   -- ms after typing before the type model runs
+    max_visible_lines = 12,      -- 0 disables
+    disabled_in = {},            -- treesitter scopes, e.g. { "comment", "string" }
+    enabled_modes = { "insert", "normal" },
+    cursor_prediction = {
+      enabled = true,
+      auto_advance = true,
+      proximity_threshold = 3,   -- 0 disables
+    },
+    ignore_paths = {             -- glob patterns that skip completions
+      "*.min.js",
+      "*.min.css",
+      "*.map",
+      "*-lock.json",
+      "*.lock",
+      "*.sum",
+      "*.csv",
+      "*.tsv",
+      "*.parquet",
+      "*.zip",
+      "*.tar",
+      "*.gz",
+      "*.pem",
+      "*.key",
+      ".env",
+      ".env.*",
+      "*.log",
+    },
+    ignore_filetypes = { "", "terminal" },
+    ignore_gitignored = true,
+  },
+
+  debug = { immediate_shutdown = false },
 })
 ```
 
+- `fim_tokens` takes `prefix`, `suffix`, `middle`, `repo_name`, `file_sep`,
+  `filename` and `suffix_first`. Set it only when detection guesses wrong.
+- `quality.min_confidence` floors on mean token logprob, so a gating value
+  is negative such as -1.5. 0 disables the gate.
+- `retrieval.max_chunks` is 0 for the default of 8 chunks.
+- `state_dir` holds the daemon log at `state_dir/cursortab.log`.
+
 </details>
-
-## Usage
-
-- **Tab Key**: Navigate to cursor predictions or accept completions
-- **Shift-Tab Key**: Partially accept completions (word-by-word for inline,
-  line-by-line for multi-line)
-- **Esc Key**: Reject current completions
-- The plugin automatically shows jump indicators for predicted cursor positions
-- Visual indicators appear for additions, deletions, and completions
-- Off-screen jump targets show directional arrows with distance information
-
-### Dual mode (FIM + next-edit)
-
-With `next_edit.enabled`, the plugin runs a second edit-prediction provider
-alongside the main one. The two are temporally exclusive, so a single Tab
-always accepts whatever is visible:
-
-- While you type, the main provider (e.g. FIM) owns the ghost text.
-- When you pause with a completion displayed, the plugin asks the next-edit
-  model. If it has an edit worth making, it replaces the ghost text; if not,
-  the ghost stays.
-- Any keystroke cancels the next-edit suggestion instantly, and typing
-  re-triggers the main provider.
-- In normal mode, going idle triggers the next-edit model directly.
-
-Both models stay loaded server-side (llama.cpp router with
-`LLAMA_ARG_MODELS_MAX: 2`), so there is no swap cost.
-
-```lua
-next_edit = {
-  enabled = true,
-  type = "zeta-2.1",   -- "zeta-2.1", "zeta-2", "zeta", or "sweep"
-  model = "zeta-2.1.Q4_K_M",
-  idle_delay = 500,    -- ms of no typing before consulting the model
-},
-```
-
-### Commands
-
-- `:CursortabToggle`: Toggle the plugin on/off
-- `:CursortabShowLog`: Show the cursortab log file in a new buffer
-- `:CursortabClearLog`: Clear the cursortab log file
-- `:CursortabStatus`: Show detailed status information about the plugin and
-  daemon
-- `:CursortabRestart`: Restart the cursortab daemon process
-
-## Development
-
-```bash
-# Build the server
-cd server && go build
-
-# Run all tests
-cd server && go test ./...
-```
-
-For E2E tests, eval harness, and detailed development instructions, see
-[CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## FAQ
 
 <details>
-<summary>Why are completions slow?</summary>
+<summary>Completions are not showing</summary>
 
-1. Use a smaller or more heavily quantized model (e.g., Q4 instead of Q8)
-2. Decrease `provider.max_tokens` to reduce output length
-3. Decrease `provider.context_size` to reduce input context sent to the model
+Run `:checkhealth cursortab` first. It reports the probe results, the
+configured models and the connection state.
 
-The `copilot` provider is known to be slower than the rest.
+Then open the log with `:Cursortab log`. Every suppression is logged at
+Info level with one of these reasons:
 
-</details>
+- `no-edits`: an idle or edit request found nothing to rewrite
+- `disabled-scope`: the cursor sits in a treesitter scope from
+  `behavior.disabled_in`
+- `single-deletion`: the change would only delete text
+- `low-confidence`: mean logprob is below `quality.min_confidence`
+- `rejection-cache`: a similar completion was rejected recently
+- `stale`: a newer keystroke superseded the request
+- `mode`: the current mode is not in `behavior.enabled_modes`
 
-<details>
-<summary>Why are completions not working?</summary>
-
-1. Update to the latest version, restart Neovim and restart the daemon with
-   `:CursortabRestart`
-2. Increase `provider.completion_timeout` (default: 5000ms) to 10000 or more if
-   your model is slow
-3. Increase `provider.context_size` to give the model more surrounding context
-   (trade-off: slower completions)
-4. If the daemon log (`:CursortabLog`) shows "exceeds the available context
-   size", the prompt plus `max_tokens` no longer fit your server's context.
-   Lower `provider.context_size` to your llama-server's `-c` value, or raise
-   `-c` when starting llama-server.
+A manual trigger bypasses every gate.
 
 </details>
 
 <details>
-<summary>How do I update the plugin?</summary>
+<summary>Completions are slow</summary>
 
-Use your Neovim plugin manager to pull the latest changes, then restart Neovim.
-The daemon will automatically restart if the configuration has changed. You can
-also run `:CursortabRestart` to force a restart.
+- A router that sleeps models reloads on the first request after idle. This
+  is cold model wake. Later requests are fast again.
+- Check `--cache-reuse`, it reuses the KV cache across keystrokes.
+- Add speculative decoding with `--model-draft`.
+- Lower `max_tokens` and quantize harder.
+- Lower `context_size` to send less input.
 
 </details>
 
 <details>
-<summary>Why isn't my API key or environment variable being picked up?</summary>
+<summary>Remote server or timeouts</summary>
 
-The plugin runs a background daemon that persists after Neovim closes.
-Environment variables are only loaded when the daemon starts. If you add or
-change an environment variable (e.g., `OPENAI_API_KEY` in your `.zshrc`), run
-`:CursortabRestart` to restart the daemon with the new environment variables.
-
-Note: If you change plugin configuration (e.g., switch providers), the daemon
-will automatically restart on the next `setup()` call.
+- `:checkhealth cursortab` shows whether the connection is up and what the
+  probe resolved.
+- Set `url` to the full server origin, including scheme and port.
+- Set `api_key_env` for authenticated servers. The daemon reads the
+  environment at startup, so run `:Cursortab restart` after changing it.
 
 </details>
+
+<details>
+<summary>Switching models</summary>
+
+Run `:Cursortab model`. It probes `GET /v1/models`, opens a picker grouped
+by role and restarts the daemon with your choices.
+
+</details>
+
+<details>
+<summary>Updating the plugin</summary>
+
+Pull with your plugin manager, then restart the daemon with
+`:Cursortab restart`.
+
+</details>
+
+## Eval harness
+
+The eval harness records editing scenarios and replays them against local
+targets.
+
+- `CURSORTAB_EVAL_URL`: server to record against, defaults to
+  http://localhost:8000
+- `CURSORTAB_EVAL_API_KEY`: optional, local servers need none
+- `just eval-record <target>`: record cassettes for one target
+- `just eval`: run the suite and fill baseline.json
+- `just eval-check`: verify results against baseline.json, which ratchets
+
+Cassettes live in sidecar directories next to their scenarios.
+
+## Benchmarks
+
+50 scenario instances, 25 quality and 25 suppress, recorded against a
+llama.cpp router. These are first-party numbers on a new scenario set. They
+are not comparable to the table in older README versions.
+
+- **Score**: deltaChrF x F1(show, quiet) with deltaChrF as a fraction.
+  F1 is the harmonic mean of show rate and quiet rate.
+- **deltaChrF**: edit quality when shown, a character n-gram F-score on the
+  diff region.
+- **Show rate**: fraction of quality scenarios where a completion was shown.
+- **Quiet rate**: fraction of suppress scenarios where nothing was shown.
+
+| Target                  | Dialect       | Score | deltaChrF | Show rate | Quiet rate | p50 (ms) | p90 (ms) |
+| ----------------------- | ------------- | ----: | --------: | --------: | ---------: | -------: | -------: |
+| zeta-2.1                | edit-zeta21   |  0.26 |     34.7 |       60% |       100% |      921 |     1543 |
+| zeta-2                  | edit-zeta2    |  0.23 |     32.6 |       56% |        96% |      843 |     1613 |
+| qwen3.5-0.8B            | fim-qwen      |  0.20 |     34.2 |       84% |        44% |      120 |      410 |
+| mellum-4b               | fim-mellum    |  0.16 |     22.9 |       52% |       100% |       55 |      824 |
+| sweep-next-edit-v2-7B   | edit-sweep    |  0.11 |     25.8 |       48% |        40% |      354 |      673 |
 
 ## Contributing
 
@@ -831,5 +381,5 @@ test, and eval instructions.
 
 ## License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
-for details.
+This project is licensed under the MIT License. See the [LICENSE](LICENSE)
+file for details.

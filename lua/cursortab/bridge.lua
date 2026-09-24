@@ -57,7 +57,7 @@ function M.send_copilot_nes_request(client_names, params)
 	local bufnr = vim.api.nvim_get_current_buf()
 
 	-- Use the LSP protocol version (what Neovim sends in didChange), not b:changedtick.
-	-- These can diverge; using the wrong one causes Copilot to compute edits against
+	-- These can diverge. Using the wrong one causes Copilot to compute edits against
 	-- a mismatched document, producing wrong line numbers.
 	local version = vim.lsp.util.buf_versions[bufnr] or vim.b[bufnr].changedtick
 

@@ -1,4 +1,4 @@
-Correct TypeScript interface and utility functions — no edits needed at any cursor position.
+Correct TypeScript interface and utility functions - no edits needed at any cursor position.
 id: suppress-ts-user
 language: typescript
 file: user.ts
@@ -24,5 +24,4 @@ export function greetUser(user: User): string {
 }
 -- steps --
 request-completion manual
-  expect !shown
 

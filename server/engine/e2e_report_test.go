@@ -147,35 +147,11 @@ func runEngineScenarioForReport(sc *engineScenario) scenarioResult {
 					EndLineInc: step.Completion.EndLineInc,
 					Lines:      step.Completion.Lines,
 				}
-				sr.Shown = eng.processCompletion(completionResponse(comp)) == completionShown
+				sr.Shown = eng.processCompletionWithManual(completionResponse(comp), false) == completionShown
 			}
 
-		case "prefetch":
-			if step.Completion != nil {
-				sr.OldLines, sr.OldEndOrig, sr.OldEndActual = extractOldLines(buf.lines, step.Completion)
-				sr.OldStart = step.Completion.StartLine
-				sr.NewLines = step.Completion.Lines
-
-				eng.storeReadyPrefetch(&types.CompletionResponse{Completion: &types.Completion{
-					StartLine:  step.Completion.StartLine,
-					EndLineInc: step.Completion.EndLineInc,
-					Lines:      step.Completion.Lines,
-				}}, false)
-				sr.Shown = eng.tryShowPrefetchedCompletion()
-			}
-
-		case "stash-prefetch":
-			if step.Completion != nil {
-				sr.OldLines, sr.OldEndOrig, sr.OldEndActual = extractOldLines(buf.lines, step.Completion)
-				sr.OldStart = step.Completion.StartLine
-				sr.NewLines = step.Completion.Lines
-
-				eng.storeReadyPrefetch(&types.CompletionResponse{Completion: &types.Completion{
-					StartLine:  step.Completion.StartLine,
-					EndLineInc: step.Completion.EndLineInc,
-					Lines:      step.Completion.Lines,
-				}}, false)
-			}
+		case "prefetch", "stash-prefetch":
+			sr.Failures = append(sr.Failures, "prefetch steps were removed with the prefetch feature")
 
 		case "accept":
 			if eng.stagedCompletion != nil && eng.stagedCompletion.CurrentIdx < len(eng.stagedCompletion.Stages) {
@@ -249,12 +225,6 @@ func runEngineScenarioForReport(sc *engineScenario) scenarioResult {
 				want := strings.ToLower(step.Expect.State)
 				if actual != want {
 					sr.Failures = append(sr.Failures, fmt.Sprintf("state: got %q, want %q", actual, want))
-				}
-			}
-			if step.Expect.PrefetchStatus != "" {
-				actual := prefetchStatusName(eng.prefetch)
-				if !strings.EqualFold(actual, step.Expect.PrefetchStatus) {
-					sr.Failures = append(sr.Failures, fmt.Sprintf("prefetchStatus: got %q, want %q", actual, step.Expect.PrefetchStatus))
 				}
 			}
 		}

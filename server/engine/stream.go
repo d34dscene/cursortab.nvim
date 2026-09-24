@@ -13,6 +13,11 @@ func (e *Engine) startCompletionStream(stream CompletionStream, manual bool) {
 	viewportTop, viewportBottom := e.buffer.ViewportBounds()
 	windowStart, oldLines := stream.Window()
 
+	if e.pending != nil {
+		e.showGen = e.pending.gen
+		e.showOrigin = e.pending.role
+	}
+
 	e.streamingState = &streamingState{
 		Manual: manual,
 		StageBuilder: text.NewIncrementalStageBuilder(
@@ -32,13 +37,15 @@ func (e *Engine) startCompletionStream(stream CompletionStream, manual bool) {
 	e.streamLinesChan = stream.Lines()
 }
 
+// cancelStreaming drops the live stream and releases its request. It may run
+// while a different request is being set up, so callers supersede first.
 func (e *Engine) cancelStreaming() {
 	e.streamLinesChan = nil
 	if e.completionStream != nil {
 		e.completionStream.Cancel()
 		e.completionStream = nil
 	}
-	e.cancelCurrentRequest()
+	e.cancelPending()
 	e.streamingState = nil
 	e.acceptedDuringStreaming = false
 }
@@ -49,7 +56,7 @@ func (e *Engine) cancelStreamingKeepPartial() {
 		e.completionStream.Cancel()
 		e.completionStream = nil
 	}
-	e.cancelCurrentRequest()
+	e.cancelPending()
 	e.streamingState = nil
 }
 
@@ -75,7 +82,6 @@ func (e *Engine) handleStreamLine(line string) {
 			)
 			if !needsNav {
 				if e.renderStreamedStage(finalized) {
-					e.recordMetricsShown(nil, ss.Manual)
 					ss.FirstStageRendered = true
 				}
 			}
@@ -86,6 +92,27 @@ func (e *Engine) handleStreamLine(line string) {
 	ss.HasPendingLine = true
 }
 
+// releasePending ends the streaming request's lifecycle after Finish. The
+// request context stays alive until then so the tail can still be read.
+func (e *Engine) releasePending() {
+	if e.pending == nil {
+		return
+	}
+	if e.pending.cancel != nil {
+		e.pending.cancel()
+	}
+	e.pending = nil
+}
+
+// armStreamEnd re-arms exactly one timer after a stream finishes: type-role
+// streams arm the pause timer, edit-role streams follow §6.3 and wait for the
+// next user event.
+func (e *Engine) armStreamEnd(role Role) {
+	if role == RoleType {
+		e.startIdleTimer()
+	}
+}
+
 func (e *Engine) handleStreamCompleteSimple() {
 	e.streamLinesChan = nil
 
@@ -94,6 +121,10 @@ func (e *Engine) handleStreamCompleteSimple() {
 	}
 
 	ss := e.streamingState
+	role := RoleType
+	if e.pending != nil {
+		role = e.pending.role
+	}
 
 	if e.acceptedDuringStreaming {
 		e.acceptedDuringStreaming = false
@@ -106,8 +137,9 @@ func (e *Engine) handleStreamCompleteSimple() {
 			}
 			e.completionStream = nil
 		}
-		e.cancelCurrentRequest()
+		e.releasePending()
 		e.streamingState = nil
+		e.armStreamEnd(role)
 		return
 	}
 
@@ -124,22 +156,24 @@ func (e *Engine) handleStreamCompleteSimple() {
 			streamResponse = resp
 		} else {
 			logger.Error("stream completion error: %v", err)
-			e.cancelCurrentRequest()
+			e.releasePending()
 			e.streamingState = nil
 			e.completionStream = nil
 			e.reject()
+			e.armStreamEnd(role)
 			return
 		}
 	}
-	e.cancelCurrentRequest()
+	e.releasePending()
 
 	// The provider's Parse rejected the accumulated text (e.g. FIM suffix
 	// overlap stripped to empty) although streaming already built stages from
-	// the raw lines. Batch requests would have shown nothing; drop the
+	// the raw lines. Batch requests would have shown nothing, drop the
 	// completion for parity.
 	if streamResponse != nil &&
 		streamResponse.Completion == nil && streamResponse.CursorTarget == nil {
 		e.reject()
+		e.armStreamEnd(role)
 		return
 	}
 
@@ -153,6 +187,7 @@ func (e *Engine) handleStreamCompleteSimple() {
 
 	if stagingResult == nil || len(stagingResult.Stages) == 0 {
 		e.state = stateIdle
+		e.armStreamEnd(role)
 		return
 	}
 
@@ -170,17 +205,18 @@ func (e *Engine) handleStreamCompleteSimple() {
 	firstStage := stagingResult.Stages[0]
 	if e.suppressRejectedCompletionForStage(firstStage, ss.Manual) {
 		e.reject()
+		e.armStreamEnd(role)
 		return
 	}
 
 	// If we already rendered a stage during streaming, keep it as-is.
 	// Re-rendering would cause visible flicker since Finalize() diffs against
-	// full old lines (vs partial during streaming), producing different groups.
-	// The accept path reconciles any boundary mismatch (accept.go:54-63).
+	// full old lines (vs partial during streaming), producing different
+	// groups. The accept path reconciles any boundary mismatch (accept.go).
 	if firstStageRendered {
 		e.cursorTarget = firstStage.CursorTarget
 		e.state = stateHasCompletion
-		e.maybeArmNextEdit()
+		e.armStreamEnd(role)
 		return
 	}
 
@@ -191,9 +227,13 @@ func (e *Engine) handleStreamCompleteSimple() {
 	} else {
 		e.showCurrentStage()
 	}
-	e.maybeArmNextEdit()
+	e.armStreamEnd(role)
 }
 
+// handleStreamCompleteAfterAccept processes the stream tail that arrived
+// after the user accepted mid-stream: a follow-up completion is shown when
+// its first changed line is close to the cursor, otherwise only the jump is
+// shown.
 func (e *Engine) handleStreamCompleteAfterAccept(resp *types.CompletionResponse, manual bool) {
 	if resp == nil {
 		return
@@ -227,17 +267,19 @@ func (e *Engine) handleStreamCompleteAfterAccept(resp *types.CompletionResponse,
 	}
 
 	distance := utils.Abs(targetLine - e.buffer.Row())
-
 	if distance <= e.config.CursorPrediction.ProximityThreshold {
-		e.storeReadyPrefetch(resp, manual)
-		e.tryShowPrefetchedCompletionWithManual(manual)
-	} else {
-		e.showCursorTargetWithCandidate(&types.CursorPredictionTarget{
-			LineNumber:      int32(targetLine),
-			ShouldRetrigger: false,
-		}, e.rejectedCompletionFor(comp))
-		e.storeReadyPrefetch(resp, manual)
+		if e.pending != nil {
+			e.showGen = e.pending.gen
+			e.showOrigin = e.pending.role
+		}
+		e.processCompletionWithManual(resp, manual)
+		return
 	}
+
+	e.showCursorTargetWithCandidate(&types.CursorPredictionTarget{
+		LineNumber:      int32(targetLine),
+		ShouldRetrigger: false,
+	}, e.rejectedCompletionFor(comp))
 }
 
 func (e *Engine) renderStreamedStage(stage *text.Stage) bool {

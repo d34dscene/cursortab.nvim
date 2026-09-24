@@ -10,6 +10,7 @@ import (
 	"cursortab/engine"
 	"cursortab/eval/cassette"
 	"cursortab/eval/clock"
+	"cursortab/provider"
 	"cursortab/types"
 )
 
@@ -29,15 +30,16 @@ const (
 type Config struct {
 	// TargetFilter restricts execution to targets whose name is in this list.
 	// When empty, every target declared by the scenario is run. The filter
-	// never *adds* targets — it only narrows the scenario's declared set.
+	// never *adds* targets, it only narrows the scenario's declared set.
 	TargetFilter []string
 	// Mode controls replay vs record.
 	Mode Mode
 	// Transport is the real http.RoundTripper used in Record mode. Ignored in
 	// Replay mode. Defaults to http.DefaultTransport.
 	Transport http.RoundTripper
-	// BaseConfig provides API keys and editor metadata applied to every
-	// target. Target-level overrides (Model, URL) take precedence.
+	// BaseConfig provides defaults (such as the record-mode API key)
+	// applied to every target. Target-level overrides (Model, URL) take
+	// precedence.
 	BaseConfig *types.ProviderConfig
 	// StrictModelVersion fails replay when a cassette's meta model_version
 	// doesn't match the target's configured model.
@@ -50,7 +52,6 @@ type StepOutcome struct {
 	Shown             bool
 	Suppressed        bool
 	SuppressReason    string
-	StageCount        int
 	StagedLines       []string
 	ProviderLatencyMs int64
 	Err               error
@@ -122,12 +123,9 @@ func resolveTargets(sc *Scenario, filter []string) []Target {
 func runTarget(sc *Scenario, t Target, cfg Config) *TargetOutcome {
 	to := &TargetOutcome{Target: t}
 
-	// Build the transport and/or LSP client, per target type. HTTP targets
-	// use a cassette replayer transport; copilot goes through an LSP
-	// cassette client that doesn't touch the HTTP layer at all.
+	// Build the transport: HTTP cassette replay or record for the target.
 	var transport http.RoundTripper
 	var replayer *cassette.Replayer
-	var copilotLSP *cassetteCopilotLSP
 	var recorder *cassette.Recorder
 
 	switch cfg.Mode {
@@ -147,20 +145,9 @@ func runTarget(sc *Scenario, t Target, cfg Config) *TargetOutcome {
 			return to
 		}
 		to.Cassette = cs
-		// Only HTTP targets get the replayer transport. Copilot targets
-		// use the cassette directly via the LSP client built inside
-		// BuildProviderForTarget — they never touch this transport.
-		if t.Type == "copilot" {
-			copilotLSP = newCassetteCopilotLSP(cs)
-		} else {
-			replayer = cassette.NewReplayer(cs)
-			transport = replayer
-		}
+		replayer = cassette.NewReplayer(cs)
+		transport = replayer
 	case ModeRecord:
-		if t.Type == "copilot" {
-			to.Error = fmt.Errorf("copilot cannot be recorded from the standalone harness (no live Neovim LSP); populate cassette/%s.ndjson by hand or via a Neovim-side dumper", t.Name)
-			return to
-		}
 		inner := cfg.Transport
 		if inner == nil {
 			inner = http.DefaultTransport
@@ -170,14 +157,14 @@ func runTarget(sc *Scenario, t Target, cfg Config) *TargetOutcome {
 		transport = recorder
 	}
 
-	prov, err := BuildProviderForTarget(t, cfg.BaseConfig, transport, to.Cassette, copilotLSP)
+	prov, err := BuildProviderForTarget(t, cfg.BaseConfig, transport)
 	if err != nil {
 		to.Error = err
 		return to
 	}
 
 	row, col := sc.Buffer.Row, sc.Buffer.Col
-	if t.Type == "fim" && sc.FIMRow > 0 {
+	if t.Role == provider.RoleType && sc.FIMRow > 0 {
 		row, col = sc.FIMRow, sc.FIMCol
 	}
 	buf := NewEvalBuffer(sc.FilePath, sc.Buffer.Lines, row, col)
@@ -203,17 +190,15 @@ func runTarget(sc *Scenario, t Target, cfg Config) *TargetOutcome {
 
 	fc := clock.New(time.Time{})
 	eng, err := engine.NewEngine(prov, buf, engine.EngineConfig{
-		ProviderName:        t.Name,
 		CompletionTimeout:   30 * time.Second,
 		IdleCompletionDelay: -1,
 		TextChangeDebounce:  -1,
 		CursorPrediction: engine.CursorPredictionConfig{
 			Enabled: false,
 		},
-		CompleteInInsert:       true,
-		CompleteInNormal:       true,
-		DisableProviderMetrics: true,
-	}, fc, nil)
+		CompleteInInsert: true,
+		CompleteInNormal: true,
+	}, fc)
 	if err != nil {
 		to.Error = fmt.Errorf("engine init: %w", err)
 		return to
@@ -224,24 +209,18 @@ func runTarget(sc *Scenario, t Target, cfg Config) *TargetOutcome {
 	defer eng.Stop()
 
 	for i, step := range sc.Steps {
-		// Snapshot replayer/copilot duration before the step so we can
-		// attribute recorded latency to this specific step. Wall-clock
-		// latency is always ~0 on replay, so we derive step latency from
-		// the cassette interactions the step consumed.
+		// Snapshot replayer duration before the step so we can attribute
+		// recorded latency to this specific step. Wall-clock latency is
+		// always ~0 on replay, so we derive step latency from the cassette
+		// interactions the step consumed.
 		beforeTotal := int64(0)
 		if replayer != nil {
 			beforeTotal = replayer.TotalDurationMs()
-		}
-		if copilotLSP != nil {
-			beforeTotal = copilotLSP.TotalDurationMs()
 		}
 		outcome := runStep(eng, fc, step)
 		outcome.Step = step
 		if replayer != nil && step.Action == ActionRequestCompletion {
 			outcome.ProviderLatencyMs = replayer.TotalDurationMs() - beforeTotal
-		}
-		if copilotLSP != nil && step.Action == ActionRequestCompletion {
-			outcome.ProviderLatencyMs = copilotLSP.TotalDurationMs() - beforeTotal
 		}
 		to.Steps = append(to.Steps, outcome)
 		if outcome.Err != nil {
@@ -253,7 +232,7 @@ func runTarget(sc *Scenario, t Target, cfg Config) *TargetOutcome {
 	to.FinalBuffer = buf.Snapshot()
 
 	if recorder != nil {
-		to.Cassette = recorder.Cassette(t.Type, t.Model)
+		to.Cassette = recorder.Cassette(t.Dialect, t.Model)
 		to.RequestCount = len(to.Cassette.Interactions)
 		for _, it := range to.Cassette.Interactions {
 			to.TotalLatencyMs += it.DurationMs
@@ -262,10 +241,6 @@ func runTarget(sc *Scenario, t Target, cfg Config) *TargetOutcome {
 	if replayer != nil {
 		to.RequestCount = replayer.Used()
 		to.TotalLatencyMs = replayer.TotalDurationMs()
-	}
-	if copilotLSP != nil {
-		to.RequestCount = copilotLSP.Used()
-		to.TotalLatencyMs = copilotLSP.TotalDurationMs()
 	}
 	return to
 }
@@ -284,7 +259,6 @@ func runStep(eng *engine.Engine, fc *clock.FakeClock, step Step) StepOutcome {
 		out.Shown = res.Shown
 		out.Suppressed = res.Suppressed
 		out.SuppressReason = res.SuppressReason
-		out.StageCount = res.StageCount
 		out.StagedLines = res.StagedLines
 		out.ProviderLatencyMs = res.ProviderLatency.Milliseconds()
 	case ActionAccept:

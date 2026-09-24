@@ -30,12 +30,11 @@ func (b *materialBuffer) TreesitterSymbols(row int, col int, maxSiblings int) *t
 }
 
 func TestFileContextNeedsReportsMaterialInputs(t *testing.T) {
-	needs := Materials{RecentFiles{}, EditHistory{}, UserActions{}}.FileContextNeeds()
+	needs := Materials{RecentFiles{}, EditHistory{}}.FileContextNeeds()
 
 	assert.True(t, needs.RecentFileLines, "recent file lines")
 	assert.True(t, needs.RecentFileDiffHistories, "recent file diff histories")
 	assert.True(t, needs.CurrentDiffHistories, "current diff histories")
-	assert.True(t, needs.UserActions, "user actions")
 }
 
 func TestDiagnosticsAndTreesitterCollectFromBuffer(t *testing.T) {
@@ -60,31 +59,6 @@ func TestDiagnosticsAndTreesitterCollectFromBuffer(t *testing.T) {
 	assert.Equal(t, 7, buffer.row, "treesitter row")
 	assert.Equal(t, 11, buffer.col, "treesitter col")
 	assert.Equal(t, 4, buffer.maxSiblings, "treesitter max siblings")
-}
-
-func TestUserActionsCollectFiltersCurrentFileAppliesLimitAndClones(t *testing.T) {
-	actions := []*types.UserAction{
-		{FilePath: "current.go", Offset: 1},
-		{FilePath: "other.go", Offset: 10},
-		{FilePath: "current.go", Offset: 2},
-		{FilePath: "current.go", Offset: 3},
-	}
-	input := ContextSourceInput{
-		Current:  CurrentSnapshot{File: FileSnapshot{Path: "current.go"}},
-		Snapshot: FileContextSnapshot{UserActions: actions},
-		Limits:   CollectionLimits{MaxUserActions: 2},
-	}
-
-	material, err := UserActions{}.collect(context.Background(), input)
-	assert.NoError(t, err, "user actions collect")
-	result := material.(UserActions)
-
-	assert.Len(t, 2, result.Actions, "filtered actions")
-	assert.Equal(t, 2, result.Actions[0].Offset, "first retained action")
-	assert.Equal(t, 3, result.Actions[1].Offset, "second retained action")
-
-	actions[2].Offset = 99
-	assert.Equal(t, 2, result.Actions[0].Offset, "actions are cloned")
 }
 
 func TestRecentFilesCollectTruncatesOversizedSnapshots(t *testing.T) {
@@ -244,8 +218,7 @@ func TestCollectReportsContextChars(t *testing.T) {
 		Limits:   CollectionLimits{ContextChars: 4096},
 	}
 
-	_, used, err := Collect(context.Background(), input, Materials{RecentFiles{}})
-	assert.NoError(t, err, "collect")
+	_, used := Collect(context.Background(), input, Materials{RecentFiles{}})
 	assert.Equal(t, len("a.go")+1+len("package main")+1, used, "used chars reported")
 }
 
@@ -256,8 +229,7 @@ func TestCollectWithoutBudgetLimitCollectsUnbounded(t *testing.T) {
 		Limits:   CollectionLimits{ContextChars: -1},
 	}
 
-	materials, used, err := Collect(context.Background(), input, Materials{RecentFiles{}})
-	assert.NoError(t, err, "collect")
+	materials, used := Collect(context.Background(), input, Materials{RecentFiles{}})
 	assert.Equal(t, 0, used, "no budget means no usage tracking")
 	recent, ok := Find[RecentFiles](materials)
 	assert.True(t, ok, "recent files material")

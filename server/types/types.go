@@ -7,13 +7,6 @@ type Completion struct {
 	Lines      []string
 }
 
-type CompletionSource int
-
-const (
-	CompletionSourceTyping CompletionSource = iota
-	CompletionSourceIdle
-)
-
 // CursorPredictionTarget represents the target line for a cursor jump.
 type CursorPredictionTarget struct {
 	LineNumber      int32 // 1-indexed
@@ -22,17 +15,9 @@ type CursorPredictionTarget struct {
 
 // CompletionResponse contains one completion and optional follow-up metadata.
 type CompletionResponse struct {
-	Completion   *Completion             // Optional; nil means no text edit.
-	CursorTarget *CursorPredictionTarget // Optional, from cursor_prediction_target
-	MetricsInfo  *MetricsInfo            // Optional, for providers that track metrics
-	Confidence   *float64                // Optional mean token logprob, nil when the provider gives none
-}
-
-// MetricsInfo holds metadata for metrics tracking
-type MetricsInfo struct {
-	ID        string // Provider-specific completion ID
-	Additions int    // Number of lines added
-	Deletions int    // Number of lines deleted
+	Completion   *Completion
+	CursorTarget *CursorPredictionTarget
+	Confidence   *float64
 }
 
 // DiagnosticSeverity matches Neovim's vim.diagnostic.severity values.
@@ -180,77 +165,40 @@ type RecentBufferSnapshot struct {
 	TimestampMs int64    // Unix epoch milliseconds when file was last accessed
 }
 
-// UserActionType represents the type of user action
-type UserActionType string
-
-const (
-	ActionInsertChar      UserActionType = "INSERT_CHAR"
-	ActionInsertSelection UserActionType = "INSERT_SELECTION"
-	ActionDeleteChar      UserActionType = "DELETE_CHAR"
-	ActionDeleteSelection UserActionType = "DELETE_SELECTION"
-	ActionCursorMovement  UserActionType = "CURSOR_MOVEMENT"
-)
-
-// UserAction represents a tracked user edit action
-type UserAction struct {
-	ActionType  UserActionType
-	FilePath    string
-	LineNumber  int   // 1-indexed
-	Offset      int   // Byte offset in file
-	TimestampMs int64 // Unix epoch milliseconds
-}
-
-// ProviderType represents the type of provider
-type ProviderType string
-
-const (
-	ProviderTypeInline     ProviderType = "inline"
-	ProviderTypeFIM        ProviderType = "fim"
-	ProviderTypeSweep      ProviderType = "sweep"
-	ProviderTypeZeta       ProviderType = "zeta"
-	ProviderTypeZeta2      ProviderType = "zeta-2"
-	ProviderTypeZeta21     ProviderType = "zeta-2.1"
-	ProviderTypeCopilot    ProviderType = "copilot"
-	ProviderTypeMercuryAPI ProviderType = "mercuryapi"
-	ProviderTypeWindsurf   ProviderType = "windsurf"
-)
-
 // FIMTokenConfig holds FIM (Fill-in-the-Middle) token configuration.
 // When the provider's FIMTokens is non-nil, tokenized FIM mode is used and
 // Prefix/Suffix/Middle must all be set. When nil, the FIM provider uses the
 // OpenAI completions API prompt+suffix format (e.g. DeepSeek).
 type FIMTokenConfig struct {
-	Prefix      string // Token before the prefix content (e.g., "<|fim_prefix|>")
-	Suffix      string // Token before the suffix content (e.g., "<|fim_suffix|>")
-	Middle      string // Token before the middle/completion (e.g., "<|fim_middle|>")
-	RepoName    string // Optional repo-level FIM token (e.g., "<|repo_name|>")
-	FileSep     string // Optional file separator token (e.g., "<|file_sep|>")
-	Filename    string // Optional per-file context header (e.g., "<filename>"), Mellum style
-	SuffixFirst bool   // Emit suffix content before prefix content (Mellum, SeedCoder style)
+	Prefix      string `json:"prefix"`       // Token before the prefix content (e.g., "<|fim_prefix|>")
+	Suffix      string `json:"suffix"`       // Token before the suffix content (e.g., "<|fim_suffix|>")
+	Middle      string `json:"middle"`       // Token before the middle/completion (e.g., "<|fim_middle|>")
+	RepoName    string `json:"repo_name"`    // Optional repo-level FIM token (e.g., "<|file_sep|>")
+	FileSep     string `json:"file_sep"`     // Optional file separator token (e.g., "<|file_sep|>")
+	Filename    string `json:"filename"`     // Optional per-file context header (e.g., "<filename>"), Mellum style
+	SuffixFirst bool   `json:"suffix_first"` // Emit suffix content before prefix content (Mellum, SeedCoder style)
+}
+
+// EndpointConfig describes one model endpoint (type model, or the optional
+// edit model in dual mode).
+type EndpointConfig struct {
+	URL       string `json:"url"` // server base URL
+	APIKey    string `json:"api_key"`
+	Model     string `json:"model"`                // model id, "" or "auto" = pick best for the role via probe + family table
+	MaxTokens int    `json:"max_tokens"`           // generation cap, 0 = role default (type: 64, edit: 256)
+	TimeoutMs int    `json:"timeout_ms,omitempty"` // 0 = role default (type: 6000, edit: 20000), Lua omits this key
 }
 
 // ProviderConfig holds configuration for providers
 type ProviderConfig struct {
-	ProviderURL         string          // URL of the provider server (e.g., "http://localhost:8000")
-	APIKey              string          // Resolved API key for authenticated requests
-	ProviderModel       string          // Model name
-	ProviderTemperature float64         // Sampling temperature
-	ProviderContextSize int             // Max input context size in tokens (0 = use ProviderMaxTokens)
-	ProviderMaxTokens   int             // Max tokens to generate
-	ProviderTopK        int             // Top-k sampling (used by some providers)
-	ProviderMinP        float64         // Min-p sampling threshold (llama.cpp, 0 = server default)
-	ProviderRepeatPen   float64         // Repetition penalty (llama.cpp, 0 = server default)
-	CompletionPath      string          // API endpoint path (e.g., "/v1/completions")
-	FIMTokens           *FIMTokenConfig // nil = prompt+suffix mode; non-nil = tokenized FIM
-	CompletionTimeout   int             // Timeout for completion requests in milliseconds
-	RetrievalEnabled    bool            // Include workspace code retrieved for the cursor
-	RetrievalMaxChunks  int             // Max retrieved chunks per prompt (0 = default)
-	Logprobs            bool            // Request token logprobs and gate on their confidence
-	MinConfidence       float64         // Drop completions with mean token logprob below this; must be <= 0, 0 disables
-	PrivacyMode         bool            // Don't send telemetry to provider
-	Version             string          // Plugin version for metrics/telemetry
-	EditorVersion       string          // Editor version (e.g., "0.10.0")
-	EditorOS            string          // Operating system name (e.g., "Darwin")
-	StateDir            string          // State directory for persistent data (device_id, etc.)
-	DeviceID            string          // Persistent device identifier
+	Endpoint           EndpointConfig  `json:"endpoint"`     // type model (autocomplete)
+	NextEdit           *EndpointConfig `json:"next_edit"`    // nil = single mode
+	ContextSize        int             `json:"context_size"` // 0 = auto: probe /props or /v1/models meta, else 8192
+	Temperature        float64         `json:"temperature"`
+	FIMTokens          *FIMTokenConfig `json:"fim_tokens"`      // nil = probe /tokenize or family preset
+	CompletionPath     string          `json:"completion_path"` // "" = /v1/completions
+	RetrievalEnabled   bool            `json:"retrieval_enabled"`
+	RetrievalMaxChunks int             `json:"retrieval_max_chunks"`
+	Logprobs           bool            `json:"logprobs"`
+	MinConfidence      float64         `json:"min_confidence"` // must be <= 0, 0 disables
 }

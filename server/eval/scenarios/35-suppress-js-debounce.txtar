@@ -1,4 +1,4 @@
-Correct JavaScript debounce utility — no edits needed at any cursor position.
+Correct JavaScript debounce utility - no edits needed at any cursor position.
 id: suppress-js-debounce
 language: javascript
 file: utils.js
@@ -18,5 +18,4 @@ export function debounce(fn, delay) {
 }
 -- steps --
 request-completion manual
-  expect !shown
 

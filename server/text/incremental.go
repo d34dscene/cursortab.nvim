@@ -10,7 +10,6 @@ import (
 type IncrementalDiffBuilder struct {
 	OldLines    []string     // Original content lines
 	NewLines    []string     // Accumulated new content lines
-	Changes     []LineChange // Accumulated changes
 	LineMapping *LineMapping // Coordinate mapping between old and new
 
 	// Tracking state
@@ -53,7 +52,6 @@ func (b *IncrementalDiffBuilder) AddLine(line string) *LineChange {
 			NewLineNum: newLineNum,
 			Content:    line,
 		}
-		b.Changes = append(b.Changes, change)
 		return &change
 	}
 
